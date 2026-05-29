@@ -1118,6 +1118,417 @@ mod_13_process() {
 }
 
 # ---------------------------------------------------------------------------
+# 14_file_anomaly.sh — 파일 시스템 이상 (핫스팟 매일 + 콜드 요일별)
+# ---------------------------------------------------------------------------
+# 보는 것: 신규 SUID/SGID, 신규 world-writable, 임시 디렉토리의 의심 파일
+# 왜: SUID 는 root 권한 실행 채널 → 권한 상승 백도어. /tmp 의 숨김 실행 파일은
+#     거의 항상 침해 흔적.
+#
+# 부하: 디스크 점검 중 가장 비싼 모듈. 핫스팟은 매일, 콜드는 요일별 1/7 분할로
+#       부하 분산. full 모드에서는 콜드 전체를 1회 점검.
+
+# 오늘 점검할 콜드 영역 결정 (--rotate-day 인자 또는 date +%a)
+_today_cold_paths() {
+    local day
+    case "$ROTATE_DAY" in
+        auto) day="$(date +%a 2>/dev/null | tr '[:upper:]' '[:lower:]')" ;;
+        *)    day="$ROTATE_DAY" ;;
+    esac
+    case "$day" in
+        mon) printf '%s' "$ROTATE_Mon" ;;
+        tue) printf '%s' "$ROTATE_Tue" ;;
+        wed) printf '%s' "$ROTATE_Wed" ;;
+        thu) printf '%s' "$ROTATE_Thu" ;;
+        fri) printf '%s' "$ROTATE_Fri" ;;
+        sat) printf '%s' "$ROTATE_Sat" ;;
+        sun) printf '%s' "$ROTATE_Sun" ;;
+        *)   printf '' ;;
+    esac
+}
+
+# 한 경로 트리에서 SUID/SGID 파일 목록 (한 줄당 파일 경로)
+_find_suid() {
+    find "$1" -xdev \
+        \( -path /proc -o -path /sys -o -path /run \) -prune \
+        -o \( -perm -4000 -o -perm -2000 \) -type f -print 2>/dev/null
+}
+
+# 한 경로 트리에서 world-writable 일반 파일 목록 (sticky 디렉토리는 정상이므로 제외)
+_find_world_writable() {
+    find "$1" -xdev \
+        \( -path /proc -o -path /sys -o -path /run \) -prune \
+        -o -perm -o+w -type f ! -type l -print 2>/dev/null
+}
+
+mod_14_file_anomaly() {
+    local M='14_file_anomaly'
+    local cold_paths targets p
+
+    # 점검 대상 결정
+    if [ "$MODE" = 'full' ]; then
+        cold_paths="$ROTATE_Mon $ROTATE_Tue $ROTATE_Wed $ROTATE_Thu $ROTATE_Fri $ROTATE_Sat $ROTATE_Sun"
+        log_finding "$M" "mode_full" "INFO" \
+            "full 모드: 핫스팟 + 콜드 영역 전체 점검" "" 0
+    else
+        cold_paths="$(_today_cold_paths)"
+        log_finding "$M" "rotate_day" "INFO" \
+            "daily: 핫스팟 매일 + 오늘 콜드(${ROTATE_DAY:-auto}) → ${cold_paths:-(없음)}" "" 0
+    fi
+    targets="$HOTSPOTS $cold_paths"
+
+    # ----- (1) SUID/SGID 어제 diff — 신규는 HIGH -----
+    local suid_today suid_yp suid_tp f
+    suid_today="$(mk_tmp)" || return 0
+    # shellcheck disable=SC2086
+    for p in $targets; do
+        [ -d "$p" ] || continue
+        _find_suid "$p"
+        throttle_sleep
+    done | sort -u > "$suid_today"
+    state_save "$M" "suid_files" < "$suid_today"
+
+    suid_yp="$(state_yesterday_path "$M" "suid_files")"
+    if [ -n "$suid_yp" ]; then
+        suid_tp="$(state_path "$M" "suid_files")"
+        while IFS= read -r f; do
+            [ -n "$f" ] && \
+                log_finding "$M" "new_suid" "HIGH" \
+                    "신규 SUID/SGID 파일 — 권한 상승 백도어 의심" "$f" 1
+        done < <(comm -13 "$suid_yp" "$suid_tp")
+    fi
+
+    # ----- (2) world-writable 어제 diff — 신규는 MEDIUM (상위 10건) -----
+    local ww_today ww_yp ww_tp ww_cnt=0
+    ww_today="$(mk_tmp)" || return 0
+    # shellcheck disable=SC2086
+    for p in $targets; do
+        [ -d "$p" ] || continue
+        _find_world_writable "$p"
+        throttle_sleep
+    done | sort -u > "$ww_today"
+    state_save "$M" "world_writable" < "$ww_today"
+
+    ww_yp="$(state_yesterday_path "$M" "world_writable")"
+    if [ -n "$ww_yp" ]; then
+        ww_tp="$(state_path "$M" "world_writable")"
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            ww_cnt=$((ww_cnt + 1))
+            [ "$ww_cnt" -le 10 ] && \
+                log_finding "$M" "new_world_writable" "MEDIUM" \
+                    "신규 world-writable 일반 파일 — 누구나 변조 가능" "$f" 1
+        done < <(comm -13 "$ww_yp" "$ww_tp")
+        [ "$ww_cnt" -gt 10 ] && \
+            log_finding "$M" "new_world_writable_more" "INFO" \
+                "신규 world-writable 외 $((ww_cnt - 10))건 (상위 10건만 별도 보고)" "" 1
+    fi
+
+    # ----- (3) /tmp /dev/shm /var/tmp 의 숨김파일/실행권한 파일 (7일) -----
+    # 매일 공통 점검. 임시 영역의 .숨김 파일이나 +x 일반 파일은 거의 항상 의심.
+    local tmp_dirs='/tmp /dev/shm /var/tmp' susp_cnt=0
+    # shellcheck disable=SC2086
+    for p in $tmp_dirs; do
+        [ -d "$p" ] || continue
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            # systemd-private-* 등 정상 영역 제외
+            case "$f" in
+                */systemd-private-*) continue ;;
+                */snap-private-tmp/*) continue ;;
+                */.X*-lock|*/.X11-unix/*) continue ;;
+            esac
+            susp_cnt=$((susp_cnt + 1))
+            [ "$susp_cnt" -le 20 ] && \
+                log_finding "$M" "tmp_suspicious" "MEDIUM" \
+                    "임시 디렉토리의 의심 파일 (숨김 또는 실행권한, 7일 내)" \
+                    "$f" 0
+        done < <(
+            find "$p" -xdev -type f \( -name '.*' -o -perm -u+x \) -mtime -7 \
+                -not -path '*/systemd-private-*' 2>/dev/null
+        )
+        throttle_sleep
+    done
+    [ "$susp_cnt" -gt 20 ] && \
+        log_finding "$M" "tmp_suspicious_more" "INFO" \
+            "임시 디렉토리 의심 파일 외 $((susp_cnt - 20))건 (상위 20건만 별도 보고)" "" 0
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 15_persistence.sh — 지속성 메커니즘 (재부팅 후에도 살아남는 백도어)
+# ---------------------------------------------------------------------------
+# 보는 것: cron / systemd timer / rc.local / init.d / ld.so.preload /
+#          LD_PRELOAD(시스템·사용자) / /etc/profile* 의심 명령 / /etc/skel 변조
+# 왜: 공격자는 거의 항상 재부팅 후 자동 재실행을 심는다. 가장 흔한 지점들을 모은다.
+
+mod_15_persistence() {
+    local M='15_persistence'
+    local f h yp tp old_h
+
+    # ----- (1) cron 위치 전체 sha256 비교 -----
+    # /etc/crontab 와 cron.d / cron.hourly / daily / weekly / monthly,
+    # 그리고 사용자별 /var/spool/cron 까지 합쳐 변경 여부 판정.
+    {
+        for f in /etc/crontab; do
+            [ -f "$f" ] && sha256sum "$f" 2>/dev/null
+        done
+        for f in /etc/cron.d /etc/cron.hourly /etc/cron.daily \
+                 /etc/cron.weekly /etc/cron.monthly /var/spool/cron; do
+            [ -d "$f" ] || continue
+            find "$f" -type f -print0 2>/dev/null | xargs -0 -r sha256sum 2>/dev/null
+        done
+    } | sort | state_save "$M" "cron_hash"
+    yp="$(state_yesterday_path "$M" "cron_hash")"
+    if [ -n "$yp" ]; then
+        tp="$(state_path "$M" "cron_hash")"
+        if ! cmp -s "$yp" "$tp"; then
+            local diff_text
+            diff_text="$(diff "$yp" "$tp" 2>/dev/null | head -10 | tr '\n' '|')"
+            log_finding "$M" "cron_changed" "MEDIUM" \
+                "cron 관련 파일 변경 (정상 정비면 화이트리스트 등록)" \
+                "$diff_text" 1
+        fi
+    fi
+    throttle_sleep
+
+    # ----- (2) systemd timer 어제 비교 -----
+    if have_cmd systemctl; then
+        systemctl list-timers --all --no-legend 2>/dev/null \
+            | awk 'NF >= 1 { print $NF }' \
+            | sort -u | state_save "$M" "timers"
+        yp="$(state_yesterday_path "$M" "timers")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "timers")"
+            local timer
+            while IFS= read -r timer; do
+                [ -n "$timer" ] && \
+                    log_finding "$M" "new_timer" "MEDIUM" \
+                        "신규 systemd timer — 주기적 자동 실행 의심" "$timer" 1
+            done < <(comm -13 "$yp" "$tp")
+        fi
+    fi
+
+    # ----- (3) /etc/ld.so.preload 존재 = HIGH -----
+    # 대부분의 시스템에서 이 파일은 존재 자체가 비정상. 강력한 루트킷 도구.
+    if [ -f /etc/ld.so.preload ]; then
+        log_finding "$M" "ld_preload_file" "HIGH" \
+            "/etc/ld.so.preload 존재 — 시스템 전역 LD_PRELOAD 루트킷 의심" \
+            "$(head -c 256 /etc/ld.so.preload 2>/dev/null)" 0
+    fi
+
+    # ----- (4) /etc/rc.local 변경 -----
+    if [ -f /etc/rc.local ]; then
+        h="$(sha256sum /etc/rc.local 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$h" ] && printf '%s\n' "$h" | state_save "$M" "rc_local_hash"
+        yp="$(state_yesterday_path "$M" "rc_local_hash")"
+        if [ -n "$yp" ]; then
+            old_h="$(cat "$yp" 2>/dev/null)"
+            [ -n "$old_h" ] && [ "$h" != "$old_h" ] && \
+                log_finding "$M" "rc_local_changed" "HIGH" \
+                    "/etc/rc.local 변경 — 부팅 시 실행되는 스크립트 변조" "" 1
+        fi
+    fi
+
+    # ----- (5) /etc/init.d 신규 파일 -----
+    if [ -d /etc/init.d ]; then
+        find /etc/init.d -maxdepth 1 -type f 2>/dev/null \
+            | sort -u | state_save "$M" "init_d_files"
+        yp="$(state_yesterday_path "$M" "init_d_files")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "init_d_files")"
+            local newf
+            while IFS= read -r newf; do
+                [ -n "$newf" ] && \
+                    log_finding "$M" "new_init_d" "HIGH" \
+                        "/etc/init.d 신규 파일 — 부팅 시 실행 백도어 의심" "$newf" 1
+            done < <(comm -13 "$yp" "$tp")
+        fi
+    fi
+
+    # ----- (6) LD_PRELOAD 시스템 전역 검사 -----
+    # (a) systemd 서비스 Environment
+    if have_cmd systemctl; then
+        local svc_ldp
+        svc_ldp="$(systemctl show '*' --property=Id,Environment --no-pager 2>/dev/null \
+                   | awk '/^Id=/{id=$0} /^Environment=.*LD_PRELOAD/{print id "  " $0}' \
+                   | head -5)"
+        if [ -n "$svc_ldp" ]; then
+            log_finding "$M" "ld_preload_systemd" "HIGH" \
+                "systemd 서비스에 LD_PRELOAD 환경변수" "$svc_ldp" 0
+        fi
+    fi
+    # (b) 시스템 환경 파일들에 LD_PRELOAD 문자열
+    local sys_targets='/etc/environment /etc/profile /etc/bashrc /etc/bash.bashrc'
+    # shellcheck disable=SC2086
+    for f in $sys_targets; do
+        [ -f "$f" ] || continue
+        if grep -q 'LD_PRELOAD' "$f" 2>/dev/null; then
+            log_finding "$M" "ld_preload_system_config" "HIGH" \
+                "시스템 환경 설정에 LD_PRELOAD" \
+                "$f: $(grep 'LD_PRELOAD' "$f" 2>/dev/null | head -1)" 0
+        fi
+    done
+    if [ -d /etc/profile.d ]; then
+        local pd
+        while IFS= read -r pd; do
+            [ -n "$pd" ] && \
+                log_finding "$M" "ld_preload_profile_d" "HIGH" \
+                    "/etc/profile.d 에 LD_PRELOAD" "$pd" 0
+        done < <(grep -lE 'LD_PRELOAD' /etc/profile.d/* 2>/dev/null)
+    fi
+
+    # ----- (7) 사용자 셸 rc 파일 LD_PRELOAD / 의심 명령 -----
+    local home rcfile
+    for home in /root /home/*; do
+        [ -d "$home" ] || continue
+        for rcfile in "$home/.bashrc" "$home/.bash_profile" "$home/.profile"; do
+            [ -f "$rcfile" ] || continue
+            if grep -q 'LD_PRELOAD' "$rcfile" 2>/dev/null; then
+                log_finding "$M" "ld_preload_user_shell" "HIGH" \
+                    "사용자 셸 설정에 LD_PRELOAD" "$rcfile" 0
+            fi
+        done
+    done
+
+    # ----- (8) /etc/profile* /etc/bashrc 등에 의심 명령 -----
+    # 운영자가 셸 진입 시 외부 다운로드/리버스 셸이 돌도록 심는 시나리오.
+    local susp_pat='(^|[^A-Za-z_])(curl|wget|nc|ncat|bash[[:space:]]+-i|/dev/tcp/)'
+    for f in /etc/profile /etc/bashrc /etc/bash.bashrc; do
+        [ -f "$f" ] || continue
+        if grep -qE "$susp_pat" "$f" 2>/dev/null; then
+            log_finding "$M" "shell_init_suspicious" "MEDIUM" \
+                "셸 초기화에 의심 명령(curl/wget/nc/bash -i/dev/tcp)" \
+                "$f: $(grep -E "$susp_pat" "$f" 2>/dev/null | head -1)" 0
+        fi
+    done
+    if [ -d /etc/profile.d ]; then
+        local sf
+        while IFS= read -r sf; do
+            [ -n "$sf" ] && \
+                log_finding "$M" "shell_init_suspicious_d" "MEDIUM" \
+                    "/etc/profile.d 스크립트에 의심 명령" "$sf" 0
+        done < <(grep -lE "$susp_pat" /etc/profile.d/* 2>/dev/null)
+    fi
+
+    # ----- (9) /etc/skel 최근 30일 변경 -----
+    # skel 은 신규 계정 생성 시 홈으로 복사됨. 여기 백도어 심으면 모든 새 계정 감염.
+    if [ -d /etc/skel ]; then
+        local skel_changed
+        skel_changed="$(find /etc/skel -mtime -30 -type f 2>/dev/null | head -5 | tr '\n' '|')"
+        if [ -n "$skel_changed" ]; then
+            log_finding "$M" "skel_changed" "MEDIUM" \
+                "/etc/skel 최근 30일 내 변경 — 신규 계정 백도어 의심" \
+                "$skel_changed" 0
+        fi
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 16_ssh_auth.sh — SSH 인증
+# ---------------------------------------------------------------------------
+# 보는 것: 신규 authorized_keys, sshd 핵심 설정 변경, /etc/pam.d 변경,
+#          /etc/securetty 변경
+# 왜: 신규 SSH 키 1줄 추가는 공격자의 재접속 백도어 1순위. PAM/sshd 변조는
+#     인증 우회. 패키지 무결성(20) 이전에 "파일 변경 시간"으로 빠르게 잡는다.
+
+mod_16_ssh_auth() {
+    local M='16_ssh_auth'
+    local user home keys yp tp h old_h line all_today
+
+    # ----- (1) 모든 사용자 authorized_keys 어제 diff -----
+    # 형식: "<user>|<key 라인>" 으로 정렬 저장. 신규 라인 1개라도 HIGH.
+    # 빈 줄과 주석은 제외해 정상 편집 노이즈를 막는다.
+    all_today="$(mk_tmp)" || return 0
+    while IFS=: read -r user _ _ _ _ home _; do
+        [ -d "$home" ] || continue
+        keys="$home/.ssh/authorized_keys"
+        [ -f "$keys" ] || continue
+        # 한 줄씩 읽으면서 사용자 prefix
+        while IFS= read -r line; do
+            case "$line" in
+                ''|'#'*) continue ;;
+            esac
+            printf '%s|%s\n' "$user" "$line"
+        done < "$keys"
+    done < /etc/passwd | sort -u > "$all_today"
+    state_save "$M" "authorized_keys" < "$all_today"
+
+    yp="$(state_yesterday_path "$M" "authorized_keys")"
+    if [ -n "$yp" ]; then
+        tp="$(state_path "$M" "authorized_keys")"
+        while IFS= read -r line; do
+            [ -n "$line" ] && \
+                log_finding "$M" "new_ssh_key" "HIGH" \
+                    "신규 SSH authorized_key — 재접속 백도어 의심" "$line" 1
+        done < <(comm -13 "$yp" "$tp")
+        while IFS= read -r line; do
+            [ -n "$line" ] && \
+                log_finding "$M" "removed_ssh_key" "INFO" \
+                    "SSH authorized_key 제거됨" "$line" 1
+        done < <(comm -23 "$yp" "$tp")
+    fi
+
+    # ----- (2) sshd 핵심 설정 어제 비교 -----
+    # `sshd -T` 는 sshd_config + include + 기본값을 모두 반영한 effective 설정을 출력.
+    # 그래서 sshd_config 단순 sha256 보다 정확. 대신 sshd 가 root 권한 + 키 존재가
+    # 필요해서 실패하면 skip.
+    if have_cmd sshd; then
+        local sshd_today
+        sshd_today="$(mk_tmp)" || return 0
+        sshd -T 2>/dev/null \
+            | awk 'tolower($1) ~ /^(permitrootlogin|passwordauthentication|allowusers|allowgroups|denyusers|denygroups|port|permitemptypasswords|pubkeyauthentication|usepam|authorizedkeysfile|challengeresponseauthentication|kbdinteractiveauthentication)$/' \
+            | tr 'A-Z' 'a-z' | sort -u > "$sshd_today"
+        if [ -s "$sshd_today" ]; then
+            state_save "$M" "sshd_config" < "$sshd_today"
+            yp="$(state_yesterday_path "$M" "sshd_config")"
+            if [ -n "$yp" ]; then
+                tp="$(state_path "$M" "sshd_config")"
+                if ! cmp -s "$yp" "$tp"; then
+                    local diff_text
+                    diff_text="$(diff "$yp" "$tp" 2>/dev/null | head -10 | tr '\n' '|')"
+                    log_finding "$M" "sshd_config_changed" "HIGH" \
+                        "sshd 핵심 설정 변경 — 인증 정책 변조 의심" "$diff_text" 1
+                fi
+            fi
+        else
+            log_finding "$M" "sshd_T_failed" "INFO" \
+                "sshd -T 출력 없음 — 설정 비교 skip (sshd 미실행 가능)" "" 0
+        fi
+    fi
+
+    # ----- (3) /etc/pam.d 24시간 내 변경 -----
+    # 패키지 무결성(20)이 정상 해시와 비교하는 정밀 검증이라면,
+    # 여기서는 "최근에 손이 닿았는가" 라는 시간 기반 빠른 신호를 잡는다.
+    if [ -d /etc/pam.d ]; then
+        local pam_recent
+        pam_recent="$(find /etc/pam.d -type f -mtime -1 2>/dev/null | head -5 | tr '\n' '|')"
+        if [ -n "$pam_recent" ]; then
+            log_finding "$M" "pam_recently_changed" "HIGH" \
+                "/etc/pam.d 24시간 내 변경 — PAM 모듈 변조 의심" \
+                "$pam_recent" 0
+        fi
+    fi
+
+    # ----- (4) /etc/securetty (있을 때만) -----
+    if [ -f /etc/securetty ]; then
+        h="$(sha256sum /etc/securetty 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$h" ] && printf '%s\n' "$h" | state_save "$M" "securetty_hash"
+        yp="$(state_yesterday_path "$M" "securetty_hash")"
+        if [ -n "$yp" ]; then
+            old_h="$(cat "$yp" 2>/dev/null)"
+            [ -n "$old_h" ] && [ "$h" != "$old_h" ] && \
+                log_finding "$M" "securetty_changed" "MEDIUM" \
+                    "/etc/securetty 변경 — root 로그인 허용 콘솔 정책 변경" "" 1
+        fi
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # 89_dispatch.sh — 모드별 점검 모듈 디스패처
 # ---------------------------------------------------------------------------
 # run_checks 는 main()(99_footer.sh) 에서 호출된다. 모드(daily/full)에 따라
