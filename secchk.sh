@@ -1529,6 +1529,273 @@ mod_16_ssh_auth() {
 }
 
 # ---------------------------------------------------------------------------
+# 17_webshell.sh — 웹쉘 패턴 매칭
+# ---------------------------------------------------------------------------
+# 보는 것: $WEB_ROOTS 의 PHP/JSP/ASP 파일에서 patterns/webshell_regex.txt
+#          (+ patterns/custom_iocs/*.txt) 의 패턴 매칭
+# 왜: WAF 는 HTTP 요청만 보는데, 웹쉘은 이미 업로드된 후엔 그 트래픽이 정상 처리로
+#     보인다. 디스크에 남은 파일을 정기적으로 스캔하는 게 유일한 사후 탐지 수단.
+#
+# baseline diff 가 아닌 단순 패턴 매칭이므로 매칭 자체가 HIGH (diff_based=0).
+# 정상 코드에서 우연히 매칭되면 운영자가 webshell_regex.txt 의 해당 줄을 좁히거나,
+# secchk.conf 의 WEB_ROOTS 에서 그 영역을 제외한다.
+
+mod_17_webshell() {
+    local M='17_webshell'
+    local script_dir patterns_raw patterns_eff custom_dir
+
+    script_dir="$(_script_dir)"
+    patterns_raw="${script_dir}/patterns/webshell_regex.txt"
+    custom_dir="${script_dir}/patterns/custom_iocs"
+
+    if [ ! -r "$patterns_raw" ]; then
+        log_finding "$M" "no_patterns" "ERROR" \
+            "patterns/webshell_regex.txt 없음 — 웹쉘 점검 skip" \
+            "$patterns_raw" 0
+        return 0
+    fi
+
+    # 주석/빈 줄 제거한 effective 패턴 파일 만들기
+    # (grep -f 는 빈 줄을 "모든 라인 매치" 로 해석하므로 사전 필터링 필수)
+    patterns_eff="$(mk_tmp)" || return 0
+    grep -vE '^[[:space:]]*(#|$)' "$patterns_raw" > "$patterns_eff" 2>/dev/null
+    if [ ! -s "$patterns_eff" ]; then
+        log_finding "$M" "empty_patterns" "ERROR" \
+            "유효한 패턴 0건 (모두 주석?)" "$patterns_raw" 0
+        return 0
+    fi
+
+    # 존재하는 웹루트만 사용
+    local roots=() p
+    # shellcheck disable=SC2086
+    for p in $WEB_ROOTS; do
+        [ -d "$p" ] && roots+=("$p")
+    done
+    if [ ${#roots[@]} -eq 0 ]; then
+        log_finding "$M" "no_web_roots" "INFO" \
+            "웹루트 없음 — 웹쉘 점검 skip (WEB_ROOTS=${WEB_ROOTS})" "" 0
+        return 0
+    fi
+
+    # 1) 기본 패턴 매칭 (확장자: PHP/JSP/ASP 계열)
+    local matched_today
+    matched_today="$(mk_tmp)" || return 0
+    find "${roots[@]}" -type f \
+        \( -name '*.php'  -o -name '*.php3' -o -name '*.php4' -o -name '*.php5' \
+           -o -name '*.phtml' -o -name '*.phar' \
+           -o -name '*.jsp'  -o -name '*.jspx' -o -name '*.jspf' \
+           -o -name '*.asp'  -o -name '*.aspx' -o -name '*.ashx' -o -name '*.asmx' \) \
+        -print0 2>/dev/null \
+        | xargs -0 -r grep -lEf "$patterns_eff" 2>/dev/null \
+        | sort -u > "$matched_today"
+
+    # 2) 사용자 정의 IOC 추가 매칭 (있으면)
+    if [ -d "$custom_dir" ]; then
+        local custom_pat custom_eff
+        while IFS= read -r custom_pat; do
+            [ -s "$custom_pat" ] || continue
+            custom_eff="$(mk_tmp)" || continue
+            grep -vE '^[[:space:]]*(#|$)' "$custom_pat" > "$custom_eff" 2>/dev/null
+            [ -s "$custom_eff" ] || continue
+            # custom IOC 는 정적 자원도 확인 가치 있어 .html/.htm 까지 포함
+            find "${roots[@]}" -type f \
+                \( -name '*.php' -o -name '*.jsp' -o -name '*.jspx' \
+                   -o -name '*.asp' -o -name '*.aspx' \
+                   -o -name '*.html' -o -name '*.htm' -o -name '*.js' \) \
+                -print0 2>/dev/null \
+                | xargs -0 -r grep -lEf "$custom_eff" 2>/dev/null
+        done < <(find "$custom_dir" -maxdepth 1 -type f -name '*.txt' 2>/dev/null) \
+            >> "$matched_today"
+        sort -u "$matched_today" -o "$matched_today"
+    fi
+
+    # 3) 결과 보고 (상위 30건만 별도 발견, 나머지는 INFO 카운트)
+    state_save "$M" "matched_files" < "$matched_today"
+    local match_cnt=0 file h
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        match_cnt=$((match_cnt + 1))
+        h="$(sha256sum "$file" 2>/dev/null | cut -d' ' -f1)"
+        [ "$match_cnt" -le 30 ] && \
+            log_finding "$M" "webshell_pattern_match" "HIGH" \
+                "웹쉘 패턴 매칭 — 즉시 파일 내용 확인 필요" \
+                "$file sha256=${h:0:16}…" 0
+    done < "$matched_today"
+
+    if [ "$match_cnt" -gt 30 ]; then
+        log_finding "$M" "webshell_pattern_more" "INFO" \
+            "웹쉘 패턴 매칭 외 $((match_cnt - 30))건 (상위 30건만 별도 보고)" "" 0
+    elif [ "$match_cnt" -eq 0 ]; then
+        log_finding "$M" "scan_clean" "INFO" \
+            "웹쉘 패턴 매칭 0건" "scanned: ${roots[*]}" 0
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 18_log_tamper.sh — 로그 변조 + 시간 동기화 (보강 C)
+# ---------------------------------------------------------------------------
+# 보는 것: 로그 파일 사이즈 감소 / 심볼릭링크 / 0바이트, journalctl --verify,
+#          시스템 시각이 chronyd/ntpd 와 어긋남
+# 왜: 공격자가 침해 후 가장 먼저 하는 흔적 지우기. 정상 운영에서 로그는 증가만
+#     하므로 사이즈 감소는 결정적 단서. 시간 변조는 로그 timestamp 무력화의 전 단계.
+
+mod_18_log_tamper() {
+    local M='18_log_tamper'
+    local log_files=() f size yp tp
+
+    # 점검 대상 로그 (OS 별로 다름)
+    case "$OS_FAMILY" in
+        rhel)
+            log_files=(/var/log/wtmp /var/log/btmp /var/log/secure /var/log/messages)
+            ;;
+        debian)
+            log_files=(/var/log/wtmp /var/log/btmp /var/log/auth.log /var/log/syslog)
+            ;;
+        *)
+            log_files=(/var/log/wtmp /var/log/btmp)
+            ;;
+    esac
+
+    # ----- (1) 사이즈 감소 / 심볼릭링크 / 0바이트 -----
+    local sizes_today
+    sizes_today="$(mk_tmp)" || return 0
+    for f in "${log_files[@]}"; do
+        if [ -L "$f" ]; then
+            log_finding "$M" "log_symlink" "HIGH" \
+                "로그 파일이 심볼릭링크 (변조 의심)" \
+                "$f → $(readlink -- "$f" 2>/dev/null)" 0
+            continue
+        fi
+        [ -e "$f" ] || continue
+        size="$(stat -c '%s' "$f" 2>/dev/null)"
+        [ -z "$size" ] && continue
+        printf '%s %s\n' "$f" "$size" >> "$sizes_today"
+        if [ "$size" -eq 0 ]; then
+            # btmp 가 새 시스템에서 0인 건 정상이라 LOW 수준으로 격하 가능하지만,
+            # 운영 중 서버에서 0바이트는 의심. HIGH 유지하되 detail 에 컨텍스트 명시.
+            log_finding "$M" "log_zero_size" "HIGH" \
+                "로그 파일 0바이트 (':>file' 같은 truncate 변조 의심)" \
+                "$f" 0
+        fi
+    done
+    state_save "$M" "log_sizes" < "$sizes_today"
+
+    yp="$(state_yesterday_path "$M" "log_sizes")"
+    if [ -n "$yp" ]; then
+        tp="$(state_path "$M" "log_sizes")"
+        local yfile ysize tsize
+        while read -r yfile ysize; do
+            [ -n "$yfile" ] || continue
+            tsize="$(awk -v F="$yfile" '$1==F {print $2; exit}' "$tp")"
+            # 오늘 파일이 없는 경우(rotation 으로 사라짐) 는 별개 — 일단 skip.
+            [ -z "$tsize" ] && continue
+            if [ "$tsize" -lt "$ysize" ]; then
+                # 진짜 logrotate 직후 1회는 사이즈 감소가 정상.
+                # 운영자가 매일 같은 시각에 본 스크립트를 돌리면 보통 한 번만 잡힘.
+                log_finding "$M" "log_size_decreased" "HIGH" \
+                    "로그 사이즈 감소 — 변조 또는 logrotate 직후 1회 가능" \
+                    "$yfile: ${ysize}B → ${tsize}B" 1
+            fi
+        done < "$yp"
+    fi
+
+    # ----- (2) journalctl --verify -----
+    if have_cmd journalctl; then
+        local jverify
+        # --verify 는 손상 시 stderr 로 출력하고 exit code 가 0 이 아닐 수 있음.
+        # FAIL/error/invalid 등의 키워드만 추출.
+        jverify="$(journalctl --verify 2>&1 \
+                    | grep -iE 'FAIL|ERROR|invalid|tampered|corrupt' \
+                    | head -5 | tr '\n' '|')"
+        if [ -n "$jverify" ]; then
+            log_finding "$M" "journal_verify_failed" "MEDIUM" \
+                "journalctl --verify 가 손상/위조 신호 보고" \
+                "$jverify" 0
+        fi
+    fi
+
+    # ----- (3) 시간 동기화 (보강 C) -----
+    # chronyc 우선, 없으면 ntpq, 둘 다 없으면 INFO.
+    # 임계: chronyc 의 Last offset(초) 절대값 > 1, ntpq offset(ms) 절대값 > 1000.
+    if have_cmd chronyc; then
+        local offset
+        offset="$(chronyc tracking 2>/dev/null | awk '/Last offset/{print $4; exit}')"
+        if [ -n "$offset" ]; then
+            local too_big
+            too_big="$(awk -v o="$offset" 'BEGIN{ if (o<0) o=-o; print (o>1?1:0) }')"
+            if [ "$too_big" = '1' ]; then
+                log_finding "$M" "time_drift" "MEDIUM" \
+                    "chronyd 보고 offset 절대값 > 1초 (시간 변조 또는 NTP 장애)" \
+                    "Last offset=${offset}s" 0
+            fi
+        else
+            log_finding "$M" "chronyc_no_data" "INFO" \
+                "chronyc tracking 결과 없음 — chronyd 미실행 가능" "" 0
+        fi
+    elif have_cmd ntpq; then
+        local off_ms
+        # ntpq -p 의 첫 동기화 대상의 offset(ms). 9번째 컬럼.
+        off_ms="$(ntpq -p 2>/dev/null | awk 'NR==3 {print $9; exit}')"
+        if [ -n "$off_ms" ]; then
+            local too_big
+            too_big="$(awk -v o="$off_ms" 'BEGIN{ if (o<0) o=-o; print (o>1000?1:0) }')"
+            if [ "$too_big" = '1' ]; then
+                log_finding "$M" "time_drift" "MEDIUM" \
+                    "ntpd offset 절대값 > 1000ms (시간 변조 또는 NTP 장애)" \
+                    "offset=${off_ms}ms" 0
+            fi
+        fi
+    else
+        log_finding "$M" "no_time_sync_tool" "INFO" \
+            "chronyc/ntpq 둘 다 없음 — 시간 동기화 점검 skip" "" 0
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 19_kernel_module.sh — 커널 모듈
+# ---------------------------------------------------------------------------
+# 보는 것: lsmod 어제 diff (신규 로드된 모듈)
+# 왜: LKM 루트킷은 커널 영역에서 동작해 사용자 영역 탐지를 우회. 정상 운영에서
+#     커널 모듈이 갑자기 추가되는 일은 거의 없음(대부분 패키지 업데이트나 운영자
+#     명시적 작업 시점에 인지됨).
+
+mod_19_kernel_module() {
+    local M='19_kernel_module'
+    local yp tp mod
+
+    if ! have_cmd lsmod; then
+        log_finding "$M" "no_lsmod" "INFO" \
+            "lsmod 미설치 — 커널 모듈 점검 skip" "" 0
+        return 0
+    fi
+
+    lsmod 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | state_save "$M" "modules"
+    yp="$(state_yesterday_path "$M" "modules")"
+    if [ -n "$yp" ]; then
+        tp="$(state_path "$M" "modules")"
+        # 신규 모듈
+        while IFS= read -r mod; do
+            [ -n "$mod" ] && \
+                log_finding "$M" "new_kernel_module" "HIGH" \
+                    "신규 커널 모듈 — LKM 루트킷 의심 (정상 패키지 업데이트일 수도)" \
+                    "$mod" 1
+        done < <(comm -13 "$yp" "$tp")
+        # 사라진 모듈
+        while IFS= read -r mod; do
+            [ -n "$mod" ] && \
+                log_finding "$M" "removed_kernel_module" "INFO" \
+                    "커널 모듈 사라짐" "$mod" 1
+        done < <(comm -23 "$yp" "$tp")
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # 89_dispatch.sh — 모드별 점검 모듈 디스패처
 # ---------------------------------------------------------------------------
 # run_checks 는 main()(99_footer.sh) 에서 호출된다. 모드(daily/full)에 따라
