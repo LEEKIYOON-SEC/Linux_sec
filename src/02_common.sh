@@ -128,3 +128,44 @@ run_module() {
     log "module ${name} 완료 ($((end - start))s)"
     throttle_sleep
 }
+
+# ---------------------------------------------------------------------------
+# 모듈별 상태 저장 / 비교 (어제 vs 오늘 diff)
+# ---------------------------------------------------------------------------
+# 모듈이 자기 점검 결과(정렬된 텍스트)를 $TODAY_DIR/state/<module>/<key> 에 저장하면,
+# 다음날 같은 위치를 $YESTERDAY_DIR/state/<module>/<key> 로 비교할 수 있습니다.
+# 예) ss -tnlp 결과를 정규화→정렬해서 state_save, 다음날 comm 으로 신규 LISTEN 검출.
+
+# 오늘 상태 파일 경로
+state_path() {
+    printf '%s/state/%s/%s' "$TODAY_DIR" "$1" "$2"
+}
+
+# 어제 상태 파일 경로 (존재할 때만 출력, 없으면 빈 문자열)
+state_yesterday_path() {
+    [ -n "$YESTERDAY_DIR" ] || return 0
+    local p="$YESTERDAY_DIR/state/$1/$2"
+    [ -f "$p" ] && printf '%s' "$p"
+    return 0
+}
+
+# stdin → 오늘 상태 파일 (디렉토리 자동 생성)
+state_save() {
+    local p
+    p="$(state_path "$1" "$2")"
+    mkdir -p "${p%/*}" 2>/dev/null || true
+    cat > "$p"
+}
+
+# 사설망(RFC1918) + 루프백 IPv4 판정. 그 외는 "외부 IP"로 본다.
+# 이 함수는 점검 모듈 여러 곳에서 동일한 기준으로 외부 여부를 가르는 데 쓴다.
+is_private_ip() {
+    local ip="$1"
+    case "$ip" in
+        127.*|10.*|192.168.*) return 0 ;;
+        172.16.*|172.17.*|172.18.*|172.19.*|172.20.*|172.21.*|172.22.*|172.23.*) return 0 ;;
+        172.24.*|172.25.*|172.26.*|172.27.*|172.28.*|172.29.*|172.30.*|172.31.*) return 0 ;;
+        ::1|fe80:*|fc*|fd*) return 0 ;;
+        *) return 1 ;;
+    esac
+}

@@ -346,6 +346,47 @@ run_module() {
 }
 
 # ---------------------------------------------------------------------------
+# 모듈별 상태 저장 / 비교 (어제 vs 오늘 diff)
+# ---------------------------------------------------------------------------
+# 모듈이 자기 점검 결과(정렬된 텍스트)를 $TODAY_DIR/state/<module>/<key> 에 저장하면,
+# 다음날 같은 위치를 $YESTERDAY_DIR/state/<module>/<key> 로 비교할 수 있습니다.
+# 예) ss -tnlp 결과를 정규화→정렬해서 state_save, 다음날 comm 으로 신규 LISTEN 검출.
+
+# 오늘 상태 파일 경로
+state_path() {
+    printf '%s/state/%s/%s' "$TODAY_DIR" "$1" "$2"
+}
+
+# 어제 상태 파일 경로 (존재할 때만 출력, 없으면 빈 문자열)
+state_yesterday_path() {
+    [ -n "$YESTERDAY_DIR" ] || return 0
+    local p="$YESTERDAY_DIR/state/$1/$2"
+    [ -f "$p" ] && printf '%s' "$p"
+    return 0
+}
+
+# stdin → 오늘 상태 파일 (디렉토리 자동 생성)
+state_save() {
+    local p
+    p="$(state_path "$1" "$2")"
+    mkdir -p "${p%/*}" 2>/dev/null || true
+    cat > "$p"
+}
+
+# 사설망(RFC1918) + 루프백 IPv4 판정. 그 외는 "외부 IP"로 본다.
+# 이 함수는 점검 모듈 여러 곳에서 동일한 기준으로 외부 여부를 가르는 데 쓴다.
+is_private_ip() {
+    local ip="$1"
+    case "$ip" in
+        127.*|10.*|192.168.*) return 0 ;;
+        172.16.*|172.17.*|172.18.*|172.19.*|172.20.*|172.21.*|172.22.*|172.23.*) return 0 ;;
+        172.24.*|172.25.*|172.26.*|172.27.*|172.28.*|172.29.*|172.30.*|172.31.*) return 0 ;;
+        ::1|fe80:*|fc*|fd*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # 03_os_detect.sh — OS 계열 감지 + 설정 파일 로드
 # ---------------------------------------------------------------------------
 
@@ -588,6 +629,538 @@ cleanup() {
     # FD 9(lock) 닫기. 그룹으로 감싸 stderr 영구 리다이렉트를 피한다.
     { exec 9>&-; } 2>/dev/null || true
     return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# 10_account.sh — 계정 무결성
+# ---------------------------------------------------------------------------
+# 보는 것: /etc/passwd, /etc/shadow, /etc/group 변조 / UID 0 비root /
+#          빈 패스워드 / sudoers NOPASSWD / 신규 계정 / nologin인데 SSH 키 /
+#          .bash_history 무력화
+# 왜: 공격자가 가장 먼저 손대는 부분이 "재접속용 계정"과 "권한 상승 통로".
+
+mod_10_account() {
+    local M='10_account'
+    local f h key yp tp old_h
+
+    # (1) /etc/passwd /etc/shadow /etc/group 변조 — 보강 G
+    # 라인 추가/삭제뿐 아니라 셸·홈디렉토리·UID/GID 변경도 모두 sha256 으로 잡힘.
+    for f in /etc/passwd /etc/shadow /etc/group; do
+        [ -r "$f" ] || continue
+        h="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$h" ] || continue
+        key="hash_$(basename "$f")"
+        printf '%s\n' "$h" | state_save "$M" "$key"
+        yp="$(state_yesterday_path "$M" "$key")"
+        if [ -n "$yp" ]; then
+            old_h="$(cat "$yp" 2>/dev/null)"
+            if [ -n "$old_h" ] && [ "$h" != "$old_h" ]; then
+                log_finding "$M" "critical_file_changed" "HIGH" \
+                    "$f sha256가 어제와 다름 (변조 또는 정상 운영 변경)" \
+                    "$f: ${old_h:0:16}… -> ${h:0:16}…" 1
+            fi
+        fi
+    done
+
+    # (2) UID 0 인데 root 가 아닌 계정 — 권한 상승 백도어
+    local user uid shell
+    while IFS=: read -r user _ uid _ _ _ shell; do
+        [ "$uid" = "0" ] && [ "$user" != "root" ] && \
+            log_finding "$M" "uid0_non_root" "HIGH" \
+                "UID 0 인데 root 아닌 계정: $user" "shell=$shell" 0
+    done < /etc/passwd
+
+    # (3) 빈 패스워드 (shadow 두 번째 필드가 빈 라인)
+    if [ -r /etc/shadow ]; then
+        local pw
+        while IFS=: read -r user pw _; do
+            [ -z "$pw" ] && \
+                log_finding "$M" "empty_password" "HIGH" \
+                    "빈 패스워드 계정: $user" "" 0
+        done < /etc/shadow
+    fi
+
+    # (4) 신규 계정 diff
+    key='accounts'
+    getent passwd 2>/dev/null | cut -d: -f1 | sort -u | state_save "$M" "$key"
+    yp="$(state_yesterday_path "$M" "$key")"
+    if [ -n "$yp" ]; then
+        tp="$(state_path "$M" "$key")"
+        local new_user
+        while IFS= read -r new_user; do
+            [ -n "$new_user" ] && \
+                log_finding "$M" "new_account" "MEDIUM" \
+                    "신규 계정: $new_user" "" 1
+        done < <(comm -13 "$yp" "$tp")
+    fi
+
+    # (5) sudoers 변경 + NOPASSWD 신규 라인
+    if [ -r /etc/sudoers ]; then
+        # sudoers 와 sudoers.d/* 를 합쳐서 하나의 해시로 (디렉토리도 추적)
+        {
+            sha256sum /etc/sudoers 2>/dev/null
+            [ -d /etc/sudoers.d ] && find /etc/sudoers.d -type f -print0 2>/dev/null \
+                | xargs -0 -r sha256sum 2>/dev/null
+        } | sort | state_save "$M" "sudoers_hash"
+        yp="$(state_yesterday_path "$M" "sudoers_hash")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "sudoers_hash")"
+            cmp -s "$yp" "$tp" || \
+                log_finding "$M" "sudoers_changed" "HIGH" \
+                    "sudoers 또는 sudoers.d/* 가 변경됨" "" 1
+        fi
+
+        # NOPASSWD 라인 자체를 모아서 diff (어떤 라인이 추가됐는지까지 추적)
+        {
+            grep -hE '^[^#]*NOPASSWD' /etc/sudoers 2>/dev/null
+            [ -d /etc/sudoers.d ] && \
+                grep -rhE '^[^#]*NOPASSWD' /etc/sudoers.d 2>/dev/null
+        } | sed -e 's/[[:space:]]\+/ /g' -e 's/^ //;s/ $//' \
+          | sort -u | state_save "$M" "sudoers_nopasswd"
+        yp="$(state_yesterday_path "$M" "sudoers_nopasswd")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "sudoers_nopasswd")"
+            local line
+            while IFS= read -r line; do
+                [ -n "$line" ] && \
+                    log_finding "$M" "new_nopasswd" "HIGH" \
+                        "신규 NOPASSWD 라인" "$line" 1
+            done < <(comm -13 "$yp" "$tp")
+        fi
+    fi
+
+    # (6) nologin/false 셸 계정에 authorized_keys 가 있으면 인증 우회 백도어
+    local home
+    while IFS=: read -r user _ _ _ _ home shell; do
+        case "$shell" in
+            */nologin|*/false)
+                if [ -f "$home/.ssh/authorized_keys" ] && [ -s "$home/.ssh/authorized_keys" ]; then
+                    log_finding "$M" "nologin_ssh_key" "HIGH" \
+                        "nologin 셸 계정에 SSH 키 존재: $user" \
+                        "shell=$shell home=$home" 0
+                fi
+                ;;
+        esac
+    done < /etc/passwd
+
+    # (7) .bash_history 무력화 (심볼릭링크/0바이트)
+    local hist
+    for home in /root /home/*; do
+        [ -d "$home" ] || continue
+        hist="$home/.bash_history"
+        if [ -L "$hist" ]; then
+            log_finding "$M" "history_symlink" "MEDIUM" \
+                "bash_history가 심볼릭링크 (히스토리 무력화 의심): $hist" \
+                "→ $(readlink -- "$hist" 2>/dev/null)" 0
+        fi
+    done
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 11_login_history.sh — 로그인 이력
+# ---------------------------------------------------------------------------
+# 보는 것: 새벽 root 성공, 외부 IP 로그인, 실패 폭주, 동시 다중 IP 성공
+# 왜: 정상 운영자는 업무시간/사내 IP/익숙한 패턴으로 접속. 그 외는 단서.
+#
+# 정보성이 강한 모듈이라 대부분 MEDIUM/INFO. 본 모듈의 결과만으로 HIGH 단정은
+# 어렵지만, 다른 모듈(16_ssh_auth 신규 SSH 키 등)과 교차 확인용으로 가치 큼.
+
+mod_11_login_history() {
+    local M='11_login_history'
+
+    # (1) 새벽(00~05시) 시간대 root 성공 로그인 — last 출력 파싱
+    # last 출력 예: "root  pts/0  192.168.1.10  Mon May 26 02:13 - 02:45  (00:32)"
+    # 외부 IP 여부도 같이 본다.
+    if have_cmd last; then
+        local night_total=0 night_external=0 line user tty host hh
+        while IFS= read -r line; do
+            # 첫 토큰: 사용자명, 세 번째 토큰: host(IP 또는 hostname),
+            # "Mon May 26 02:13" 중 시각 부분(HH:MM) 만 추출
+            user="$(awk '{print $1}' <<<"$line")"
+            [ "$user" = 'root' ] || continue
+            host="$(awk '{print $3}' <<<"$line")"
+            # 시각은 보통 8번째 필드 (요일/월/일/시각). last -F 의 경우 9번째.
+            hh="$(awk '{
+                for (i=1;i<=NF;i++) if ($i ~ /^[0-9][0-9]:[0-9][0-9]$/) {print $i; exit}
+            }' <<<"$line" | cut -d: -f1)"
+            case "$hh" in
+                00|01|02|03|04|05)
+                    night_total=$((night_total + 1))
+                    if ! is_private_ip "$host"; then
+                        night_external=$((night_external + 1))
+                        log_finding "$M" "night_root_login_external" "MEDIUM" \
+                            "새벽 root 성공 로그인(외부 IP)" "$line" 0
+                    fi
+                    ;;
+            esac
+        done < <(last -F -n 100 root 2>/dev/null | grep -vE '^(wtmp|reboot|$)')
+        if [ "$night_total" -gt 0 ]; then
+            log_finding "$M" "night_root_login_total" "INFO" \
+                "새벽 root 로그인 ${night_total}건 (외부 ${night_external}건)" "" 0
+        fi
+    else
+        log_finding "$M" "no_last" "INFO" "last 명령 없음 — 로그인 이력 점검 skip" "" 0
+    fi
+
+    # (2) 로그인 실패 폭주: 동일 IP/사용자가 임계 초과
+    if have_cmd lastb; then
+        # 권한 부족 시 stderr 만 나고 0 줄. 그건 정상.
+        local tmp top count addr_user
+        tmp="$(mk_tmp)" || return 0
+        lastb -F 2>/dev/null \
+            | awk '$3!="" {print $1 " " $3}' \
+            | sort | uniq -c | sort -rn > "$tmp"
+        # 임계 초과만 출력
+        while read -r count addr_user; do
+            [ -z "$count" ] && continue
+            if [ "$count" -ge "$FAILED_LOGIN_THRESHOLD" ]; then
+                log_finding "$M" "failed_login_burst" "MEDIUM" \
+                    "로그인 실패 ${count}건: ${addr_user}" "" 0
+            fi
+        done < "$tmp"
+    fi
+
+    # (3) 같은 사용자가 1시간 내 다른 IP 에서 성공 → 자격증명 탈취 의심
+    if have_cmd last; then
+        # awk 로 사용자별 host 목록을 한 줄에 모은 후, 고유 host 가 3개 이상이면 보고
+        local user2 hosts uniq_count uniq_list
+        while IFS= read -r line; do
+            user2="${line%% *}"
+            hosts="${line#* }"
+            # shellcheck disable=SC2086
+            uniq_list="$(printf '%s\n' $hosts | sort -u)"
+            uniq_count="$(printf '%s\n' "$uniq_list" | grep -c .)"
+            if [ "$uniq_count" -ge 3 ]; then
+                log_finding "$M" "multi_ip_success" "MEDIUM" \
+                    "사용자 ${user2} 가 ${uniq_count} 개 서로 다른 호스트에서 로그인" \
+                    "hosts: $(printf '%s ' $uniq_list)" 0
+            fi
+        done < <(
+            last -F -n 100 2>/dev/null \
+                | awk '$1!="" && $3!="" && $1!~/^(wtmp|reboot)$/ {
+                        arr[$1] = arr[$1] " " $3
+                      } END {
+                        for (k in arr) print k arr[k]
+                      }'
+        )
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 12_network.sh — 네트워크 상태
+# ---------------------------------------------------------------------------
+# 보는 것: TCP/UDP 신규 LISTEN(보강 D), 외부 ESTABLISHED, ARP spoof, 방화벽 변조,
+#          OUTPUT 바이트 폭증
+# 왜: 백도어는 거의 항상 네트워크에 흔적을 남긴다 — bind/reverse shell, C2 통신.
+
+# ss 출력 한 줄을 비교 가능한 정규화 키로 만든다.
+# 입력: "LISTEN 0  128  0.0.0.0:22  0.0.0.0:* users:(("sshd",pid=1234,fd=3))"
+# 출력: "0.0.0.0:22  sshd"
+# pid/fd 등 매 부팅마다 바뀌는 값은 제거하여 어제와 비교 가능하게 만든다.
+_ss_normalize_listen() {
+    awk '
+        /^State/ { next }
+        NF >= 5 {
+            local_addr = $4
+            proc = ""
+            if (match($0, /users:\(\("[^"]+"/)) {
+                proc = substr($0, RSTART+8, RLENGTH-9)
+            }
+            print local_addr "  " proc
+        }
+    ' | sort -u
+}
+
+mod_12_network() {
+    local M='12_network'
+
+    if ! have_cmd ss; then
+        log_finding "$M" "no_ss" "INFO" "ss 미설치 — 네트워크 점검 skip" "" 0
+        return 0
+    fi
+
+    local tmp_today yp tp line
+
+    # (1) TCP LISTEN 어제 diff
+    tmp_today="$(mk_tmp)" || return 0
+    ss -tnlpH 2>/dev/null | _ss_normalize_listen > "$tmp_today"
+    cat "$tmp_today" | state_save "$M" "tcp_listen"
+    yp="$(state_yesterday_path "$M" "tcp_listen")"
+    if [ -n "$yp" ]; then
+        tp="$(state_path "$M" "tcp_listen")"
+        while IFS= read -r line; do
+            [ -n "$line" ] && \
+                log_finding "$M" "new_tcp_listen" "HIGH" \
+                    "신규 TCP LISTEN 포트 발견 — bind shell/백도어 가능성" \
+                    "$line" 1
+        done < <(comm -13 "$yp" "$tp")
+        # 사라진 LISTEN 도 INFO 로 (정상 서비스 종료일 수도, 흔적 청소일 수도)
+        while IFS= read -r line; do
+            [ -n "$line" ] && \
+                log_finding "$M" "removed_tcp_listen" "INFO" \
+                    "TCP LISTEN 사라짐" "$line" 1
+        done < <(comm -23 "$yp" "$tp")
+    fi
+
+    # (2) UDP LISTEN 어제 diff — DNS amplification, NTP reflection 등 (보강 D)
+    tmp_today="$(mk_tmp)" || return 0
+    ss -unlpH 2>/dev/null | _ss_normalize_listen > "$tmp_today"
+    cat "$tmp_today" | state_save "$M" "udp_listen"
+    yp="$(state_yesterday_path "$M" "udp_listen")"
+    if [ -n "$yp" ]; then
+        tp="$(state_path "$M" "udp_listen")"
+        while IFS= read -r line; do
+            [ -n "$line" ] && \
+                log_finding "$M" "new_udp_listen" "HIGH" \
+                    "신규 UDP LISTEN 포트 발견" "$line" 1
+        done < <(comm -13 "$yp" "$tp")
+    fi
+
+    # (3) 외부 IP 와의 ESTABLISHED — 어제 없던 IP 만
+    # ss -tnpH state established → "ESTAB 0 0 LOCAL:PORT  PEER:PORT  users:(...)"
+    local peer_ip established_today
+    established_today="$(mk_tmp)" || return 0
+    ss -tnpH state established 2>/dev/null \
+        | awk '{print $4, $5}' \
+        | while read -r _local peer; do
+            peer_ip="${peer%:*}"
+            [ -z "$peer_ip" ] && continue
+            if ! is_private_ip "$peer_ip"; then
+                printf '%s\n' "$peer_ip"
+            fi
+          done | sort -u > "$established_today"
+    cat "$established_today" | state_save "$M" "external_peers"
+    yp="$(state_yesterday_path "$M" "external_peers")"
+    if [ -n "$yp" ]; then
+        tp="$(state_path "$M" "external_peers")"
+        while IFS= read -r peer_ip; do
+            [ -n "$peer_ip" ] && \
+                log_finding "$M" "new_external_peer" "MEDIUM" \
+                    "어제 없던 외부 IP 와 연결 — C2 의심" "peer=$peer_ip" 1
+        done < <(comm -13 "$yp" "$tp")
+    elif [ -s "$established_today" ]; then
+        log_finding "$M" "external_peers_total" "INFO" \
+            "외부 IP 와 ESTABLISHED $(wc -l < "$established_today")건" "" 0
+    fi
+
+    # (4) ARP spoof — 동일 MAC 다중 IP / 동일 IP 다중 MAC
+    if have_cmd ip; then
+        local arp_tmp
+        arp_tmp="$(mk_tmp)" || return 0
+        ip neigh 2>/dev/null | awk '$5 != "" && $5 != "FAILED" {print $1, $5}' > "$arp_tmp"
+        # IP 별 MAC 개수
+        awk '{print $1}' "$arp_tmp" | sort | uniq -c | awk '$1 > 1 {print $2 " " $1}' \
+        | while read -r ip cnt; do
+            [ -n "$ip" ] && \
+                log_finding "$M" "arp_ip_multi_mac" "MEDIUM" \
+                    "동일 IP 에 MAC ${cnt} 개 — ARP spoofing 의심" "ip=$ip" 0
+          done
+        # MAC 별 IP 개수
+        awk '{print $2}' "$arp_tmp" | sort | uniq -c | awk '$1 > 1 {print $2 " " $1}' \
+        | while read -r mac cnt; do
+            [ -n "$mac" ] && \
+                log_finding "$M" "arp_mac_multi_ip" "MEDIUM" \
+                    "동일 MAC 에 IP ${cnt} 개 — ARP spoofing 의심" "mac=$mac" 0
+          done
+    fi
+
+    # (5) 방화벽 설정 어제 비교
+    local fw_today fw_h
+    fw_today="$(mk_tmp)" || return 0
+    {
+        have_cmd iptables-save && iptables-save 2>/dev/null
+        have_cmd nft && nft list ruleset 2>/dev/null
+        if [ "$OS_FAMILY" = 'rhel' ] && have_cmd firewall-cmd; then
+            firewall-cmd --list-all-zones 2>/dev/null
+        fi
+        if [ "$OS_FAMILY" = 'debian' ] && have_cmd ufw; then
+            ufw status verbose 2>/dev/null
+        fi
+    } > "$fw_today"
+    if [ -s "$fw_today" ]; then
+        fw_h="$(sha256sum "$fw_today" 2>/dev/null | cut -d' ' -f1)"
+        printf '%s\n' "$fw_h" | state_save "$M" "firewall_hash"
+        yp="$(state_yesterday_path "$M" "firewall_hash")"
+        if [ -n "$yp" ]; then
+            local old_fw_h
+            old_fw_h="$(cat "$yp")"
+            [ -n "$old_fw_h" ] && [ "$fw_h" != "$old_fw_h" ] && \
+                log_finding "$M" "firewall_changed" "MEDIUM" \
+                    "방화벽 설정이 어제와 다름 (정상 변경이면 화이트리스트 등록)" \
+                    "${old_fw_h:0:16}… -> ${fw_h:0:16}…" 1
+        fi
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 13_process.sh — 프로세스 무결성 (루트킷 핵심)
+# ---------------------------------------------------------------------------
+# 보는 것: 숨겨진 PID(2회 측정), deleted exe, 의심 위치 실행, 부모=init 이상,
+#          /proc/<pid>/maps 의심 .so 매핑(보강 E)
+# 왜: LKM 루트킷은 ps 결과에서 자기 PID 를 숨기지만 /proc 에는 노출된다.
+#     /proc 우선 비교가 루트킷 탐지의 결정적 단서.
+
+# 현재 /proc 와 ps 의 PID 차집합 (= ps 가 안 보여주는 PID 후보)
+_hidden_pid_snapshot() {
+    local proc_pids ps_pids
+    proc_pids="$(mk_tmp)" || return 1
+    ps_pids="$(mk_tmp)"   || return 1
+    # /proc 에서 숫자 디렉토리만
+    find /proc -maxdepth 1 -mindepth 1 -type d -regex '/proc/[0-9]+' \
+        -printf '%f\n' 2>/dev/null | sort -n -u > "$proc_pids"
+    ps -e -o pid= 2>/dev/null | awk '{print $1+0}' | sort -n -u > "$ps_pids"
+    # /proc 에는 있는데 ps 엔 없는 것
+    comm -23 "$proc_pids" "$ps_pids"
+}
+
+mod_13_process() {
+    local M='13_process'
+    local pid line
+
+    # (1) 숨겨진 PID — 2회 측정으로 race condition 제거
+    # 1차 차집합과 2차 차집합 양쪽에 모두 등장한 PID 만 진짜로 숨김으로 판정.
+    local snap1 snap2 confirmed
+    snap1="$(mk_tmp)" || return 0
+    snap2="$(mk_tmp)" || return 0
+    _hidden_pid_snapshot > "$snap1"
+    sleep 1
+    _hidden_pid_snapshot > "$snap2"
+    confirmed="$(mk_tmp)" || return 0
+    comm -12 <(sort -u "$snap1") <(sort -u "$snap2") > "$confirmed"
+
+    if [ -s "$confirmed" ]; then
+        local cmdline cwd
+        while IFS= read -r pid; do
+            [ -z "$pid" ] && continue
+            cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | head -c 256)"
+            cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)"
+            log_finding "$M" "hidden_pid" "HIGH" \
+                "ps 에는 없는데 /proc 에는 존재하는 PID (LKM 루트킷 의심)" \
+                "pid=$pid cmd=${cmdline:-?} cwd=${cwd:-?}" 0
+        done < "$confirmed"
+    fi
+
+    # (2) /proc/<pid>/exe → '(deleted)' — 메모리 상주 악성코드 패턴
+    # readlink 가 "(deleted)" 접미사를 붙이는 정확한 형식을 사용.
+    local exe
+    for d in /proc/[0-9]*; do
+        [ -d "$d" ] || continue
+        pid="${d##*/}"
+        exe="$(readlink "$d/exe" 2>/dev/null)" || continue
+        case "$exe" in
+            *' (deleted)')
+                log_finding "$M" "deleted_exe" "HIGH" \
+                    "프로세스 바이너리가 디스크에서 삭제됨 (메모리 상주 악성코드 의심)" \
+                    "pid=$pid exe=$exe" 0
+                ;;
+        esac
+    done
+
+    # (3) /tmp /dev/shm /var/tmp 에서 실행 중인 프로세스
+    for d in /proc/[0-9]*; do
+        [ -d "$d" ] || continue
+        pid="${d##*/}"
+        exe="$(readlink "$d/exe" 2>/dev/null)" || continue
+        case "$exe" in
+            /tmp/*|/dev/shm/*|/var/tmp/*)
+                local cmdline
+                cmdline="$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null | head -c 256)"
+                log_finding "$M" "suspicious_exec_location" "HIGH" \
+                    "임시 디렉토리에서 실행 중인 프로세스" \
+                    "pid=$pid exe=$exe cmd=${cmdline:-?}" 0
+                ;;
+        esac
+    done
+
+    # (4) /proc/<pid>/maps 에 의심 위치 라이브러리 로딩 — 보강 E
+    # LD_PRELOAD 우회 인젝션 / 임시 디렉토리 .so 로딩 탐지.
+    local maps
+    for d in /proc/[0-9]*; do
+        [ -d "$d" ] || continue
+        pid="${d##*/}"
+        # maps 는 권한이 없으면 못 읽으므로 조용히 skip
+        [ -r "$d/maps" ] || continue
+        # 의심 위치(.so 라이브러리, 또는 모든 매핑)에 매치되는 첫 줄만
+        line="$(grep -E ' (/tmp|/dev/shm|/var/tmp)/' "$d/maps" 2>/dev/null | head -1)"
+        if [ -n "$line" ]; then
+            log_finding "$M" "suspicious_mapping" "HIGH" \
+                "임시 디렉토리의 파일을 메모리 매핑 (메모리 인젝션 의심)" \
+                "pid=$pid map=${line:0:200}" 0
+        fi
+    done
+
+    # (5) 부모 PID=1 인데 일반 사용자 — 정상 데몬화가 아니면 의심
+    # /proc/<pid>/status 에서 PPid 와 Uid 추출.
+    local ppid uid name
+    for d in /proc/[0-9]*; do
+        [ -d "$d" ] || continue
+        pid="${d##*/}"
+        [ -r "$d/status" ] || continue
+        ppid="$(awk '/^PPid:/{print $2; exit}' "$d/status" 2>/dev/null)"
+        [ "$ppid" = '1' ] || continue
+        uid="$(awk '/^Uid:/{print $2; exit}' "$d/status" 2>/dev/null)"
+        # 시스템 계정(UID < 1000) 은 정상 데몬으로 간주, 일반 사용자(>=1000) 만 보고.
+        [ -z "$uid" ] && continue
+        [ "$uid" -ge 1000 ] || continue
+        name="$(awk '/^Name:/{print $2; exit}' "$d/status" 2>/dev/null)"
+        log_finding "$M" "init_parent_userland" "MEDIUM" \
+            "부모 PID=1 인데 일반 사용자 권한 (배포·사용자 세션 등 정상도 있음)" \
+            "pid=$pid uid=$uid name=$name" 0
+    done
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 89_dispatch.sh — 모드별 점검 모듈 디스패처
+# ---------------------------------------------------------------------------
+# run_checks 는 main()(99_footer.sh) 에서 호출된다. 모드(daily/full)에 따라
+# 정의된 모듈 함수만 골라서 실행한다. 모듈이 아직 구현 안 됐으면 조용히 skip.
+
+# 함수가 정의돼 있을 때만 run_module 로 격리 실행. Step 마다 모듈이 추가되며
+# 디스패처는 건드릴 일이 줄어든다.
+_run_if_defined() {
+    local fn="$1" name="$2"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        run_module "$fn" "$name"
+    fi
+}
+
+run_checks() {
+    log "점검 시작 (mode=${MODE})"
+
+    # daily / full 공통 — 항상 도는 모듈들
+    _run_if_defined mod_10_account           '10_account'
+    _run_if_defined mod_11_login_history     '11_login_history'
+    _run_if_defined mod_12_network           '12_network'
+    _run_if_defined mod_13_process           '13_process'
+    _run_if_defined mod_14_file_anomaly      '14_file_anomaly'
+    _run_if_defined mod_15_persistence       '15_persistence'
+    _run_if_defined mod_16_ssh_auth          '16_ssh_auth'
+    _run_if_defined mod_17_webshell          '17_webshell'
+    _run_if_defined mod_18_log_tamper        '18_log_tamper'
+    _run_if_defined mod_19_kernel_module     '19_kernel_module'
+    _run_if_defined mod_20_system_integrity  '20_system_integrity'
+    _run_if_defined mod_21_network_config    '21_network_config'
+    _run_if_defined mod_22_mail_queue        '22_mail_queue'
+    _run_if_defined mod_23_container         '23_container'
+
+    # ClamAV: --no-clamav 로 끄지 않은 경우만
+    if [ "$ENABLE_CLAMAV" -eq 1 ]; then
+        _run_if_defined mod_24_clamav        '24_clamav'
+    fi
+    # rkhunter: --with-rkhunter 로 켠 경우만
+    if [ "$ENABLE_RKHUNTER" -eq 1 ]; then
+        _run_if_defined mod_25_rkhunter      '25_rkhunter'
+    fi
+
+    log "점검 종료 (HIGH=${COUNT_HIGH} MEDIUM=${COUNT_MEDIUM} LOW=${COUNT_LOW} INFO=${COUNT_INFO} ERROR=${COUNT_ERROR})"
 }
 
 # ---------------------------------------------------------------------------
