@@ -1796,6 +1796,379 @@ mod_19_kernel_module() {
 }
 
 # ---------------------------------------------------------------------------
+# 20_system_integrity.sh — 패키지 무결성 (rpm -V / debsums)
+# ---------------------------------------------------------------------------
+# 보는 것: 배포판 패키지에 들어있는 정상 해시와 현재 파일 비교 → 변조 탐지
+# 왜: 공격자가 ls/ps/ss/sshd 등을 trojan 으로 교체하면 운영자가 보는 모든 결과가
+#     거짓이 된다. 배포판 메이커가 서명한 해시는 침해된 서버에서도 신뢰 가능.
+#
+# 부하 주의: rpm -Va 와 debsums -ce 는 디스크 전체를 읽어 시간이 걸린다.
+# idle priority 와 timeout 가드(180초) 로 운영 영향을 제한한다.
+
+mod_20_system_integrity() {
+    local M='20_system_integrity'
+    local out mismatch cnt line core_pkgs core_out core_cnt
+
+    case "$OS_FAMILY" in
+        rhel)
+            if ! have_cmd rpm; then
+                log_finding "$M" "no_rpm" "INFO" \
+                    "rpm 미설치 — 패키지 무결성 점검 skip" "" 0
+                return 0
+            fi
+
+            # 전체 rpm -Va: --nofiles(파일 리스트 출력 안 함), --nodigest(GPG 키 검사 안 함)
+            # 결과 한 줄 예: "S.5....T.  c /etc/foo.conf"
+            #   - 1~9 컬럼: 속성(S=size, 5=md5/sha, T=mtime, L=link, M=mode 등)
+            #   - 10번 컬럼: 파일 타입 (c=config, d=doc, g=ghost, l=license, r=readme)
+            # 정상 변경 가능한 타입(cdglr)은 노이즈 제거를 위해 제외.
+            out="$(mk_tmp)" || return 0
+            timeout 180 rpm -Va --nofiles --nodigest 2>/dev/null > "$out" || true
+
+            mismatch="$(mk_tmp)" || return 0
+            awk '
+                {
+                    attrs = $1
+                    file = $NF
+                    type = ""
+                    if (NF >= 3 && length($2) == 1 && index("cdglr", $2) > 0) {
+                        type = $2
+                    }
+                    if (type != "") next
+                    if (index(attrs, "5") > 0 || index(attrs, "S") > 0) {
+                        print attrs "  " file
+                    }
+                }
+            ' "$out" | sort -u > "$mismatch"
+
+            cnt="$(wc -l < "$mismatch")"
+            if [ "$cnt" -gt 0 ]; then
+                local i=0
+                while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    i=$((i + 1))
+                    [ "$i" -le 20 ] && \
+                        log_finding "$M" "rpm_mismatch" "MEDIUM" \
+                            "rpm 검증 mismatch (checksum 또는 size)" "$line" 0
+                done < "$mismatch"
+                [ "$cnt" -gt 20 ] && \
+                    log_finding "$M" "rpm_mismatch_more" "INFO" \
+                        "rpm mismatch 외 $((cnt - 20))건 (상위 20건만 별도 보고)" "" 0
+            fi
+            state_save "$M" "rpm_mismatch" < "$mismatch"
+
+            # 핵심 패키지 풀 검증 — 여기서 mismatch 가 잡히면 거의 확실히 침해
+            core_pkgs='coreutils util-linux procps-ng net-tools iproute openssh-server openssh-clients shadow-utils pam'
+            # shellcheck disable=SC2086
+            core_out="$(timeout 60 rpm -V $core_pkgs 2>/dev/null | head -50)"
+            if [ -n "$core_out" ]; then
+                core_cnt="$(printf '%s\n' "$core_out" | wc -l)"
+                log_finding "$M" "core_pkg_mismatch" "HIGH" \
+                    "핵심 패키지 ${core_cnt}건 mismatch — 시스템 명령 변조 의심" \
+                    "$(printf '%s\n' "$core_out" | head -5 | tr '\n' '|')" 0
+            fi
+            ;;
+
+        debian)
+            if ! have_cmd debsums; then
+                log_finding "$M" "no_debsums" "INFO" \
+                    "debsums 미설치(apt install debsums) — 패키지 무결성 점검 skip" "" 0
+                return 0
+            fi
+
+            # debsums -ce: changed config + 일반 파일 변경 모두 출력 (실패한 항목)
+            out="$(mk_tmp)" || return 0
+            timeout 180 debsums -ce 2>/dev/null | sort -u > "$out" || true
+
+            cnt="$(wc -l < "$out")"
+            if [ "$cnt" -gt 0 ]; then
+                local i=0
+                while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    i=$((i + 1))
+                    [ "$i" -le 20 ] && \
+                        log_finding "$M" "debsums_mismatch" "MEDIUM" \
+                            "debsums 검증 mismatch" "$line" 0
+                done < "$out"
+                [ "$cnt" -gt 20 ] && \
+                    log_finding "$M" "debsums_mismatch_more" "INFO" \
+                        "debsums mismatch 외 $((cnt - 20))건" "" 0
+            fi
+            state_save "$M" "debsums_mismatch" < "$out"
+
+            # 핵심 패키지 풀 검증
+            core_pkgs='coreutils util-linux procps net-tools iproute2 openssh-server openssh-client login libpam-modules libpam-runtime'
+            # shellcheck disable=SC2086
+            core_out="$(timeout 60 debsums $core_pkgs 2>/dev/null | grep -v 'OK$' | head -50)"
+            if [ -n "$core_out" ]; then
+                core_cnt="$(printf '%s\n' "$core_out" | wc -l)"
+                log_finding "$M" "core_pkg_mismatch" "HIGH" \
+                    "핵심 패키지 ${core_cnt}건 debsums mismatch — 시스템 명령 변조 의심" \
+                    "$(printf '%s\n' "$core_out" | head -5 | tr '\n' '|')" 0
+            fi
+            ;;
+
+        *)
+            log_finding "$M" "unknown_os" "INFO" \
+                "OS 미확인 — 패키지 무결성 점검 skip" "" 0
+            ;;
+    esac
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 21_network_config.sh — 네트워크 설정 변조
+# ---------------------------------------------------------------------------
+# 보는 것: resolv.conf 외부 DNS, /etc/hosts 외부 도메인 매핑, nsswitch 변경,
+#          yum/apt repo 변경, 신뢰 CA 저장소 신규 파일
+# 왜: DNS 하이재킹, /etc/hosts 위장, 가짜 CA 주입은 모두 "신뢰" 인프라를 공격자
+#     쪽으로 옮기는 핵심 수법. 한 번 성공하면 이후 모든 외부 통신을 가로챈다.
+
+# secchk.conf 에서 운영자가 등록할 수 있는 신뢰 외부 DNS (예: 8.8.8.8 1.1.1.1)
+# 망분리라면 보통 비어있고, 사내 DNS 만 사설망 IP 로 존재해야 정상.
+: "${TRUSTED_DNS:=}"
+
+mod_21_network_config() {
+    local M='21_network_config'
+    local f h yp tp old_h line
+
+    # ----- (1) /etc/resolv.conf -----
+    if [ -f /etc/resolv.conf ]; then
+        # 변경 감지
+        h="$(sha256sum /etc/resolv.conf 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$h" ] && printf '%s\n' "$h" | state_save "$M" "resolv_hash"
+        yp="$(state_yesterday_path "$M" "resolv_hash")"
+        if [ -n "$yp" ]; then
+            old_h="$(cat "$yp" 2>/dev/null)"
+            [ -n "$old_h" ] && [ "$h" != "$old_h" ] && \
+                log_finding "$M" "resolv_changed" "HIGH" \
+                    "/etc/resolv.conf 변경 — DNS 하이재킹 의심" \
+                    "$(awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null \
+                       | head -5 | tr '\n' ' ')" 1
+        fi
+        # 외부(비사설망) nameserver — TRUSTED_DNS 에 없으면 HIGH
+        local ns
+        while read -r ns; do
+            [ -z "$ns" ] && continue
+            if ! is_private_ip "$ns"; then
+                case " ${TRUSTED_DNS} " in
+                    *" $ns "*) continue ;;
+                esac
+                log_finding "$M" "external_nameserver" "HIGH" \
+                    "비사설망 DNS — DNS 하이재킹 의심 (정상이면 TRUSTED_DNS 등록)" \
+                    "nameserver=$ns" 0
+            fi
+        done < <(awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null)
+    fi
+
+    # ----- (2) /etc/hosts 어제 비교 — 외부 도메인 매핑은 HIGH -----
+    if [ -f /etc/hosts ]; then
+        sort -u /etc/hosts 2>/dev/null | state_save "$M" "hosts"
+        yp="$(state_yesterday_path "$M" "hosts")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "hosts")"
+            local ip
+            while IFS= read -r line; do
+                case "$line" in
+                    ''|'#'*) continue ;;
+                esac
+                ip="${line%%[[:space:]]*}"
+                if [ "$ip" = '::1' ] || is_private_ip "$ip"; then
+                    log_finding "$M" "hosts_new_private" "MEDIUM" \
+                        "/etc/hosts 신규 라인 (사설망)" "$line" 1
+                else
+                    log_finding "$M" "hosts_external_mapping" "HIGH" \
+                        "/etc/hosts 신규 외부 도메인 매핑 — 호스트 위장 의심" \
+                        "$line" 1
+                fi
+            done < <(comm -13 "$yp" "$tp")
+        fi
+    fi
+
+    # ----- (3) /etc/nsswitch.conf -----
+    if [ -f /etc/nsswitch.conf ]; then
+        h="$(sha256sum /etc/nsswitch.conf 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$h" ] && printf '%s\n' "$h" | state_save "$M" "nsswitch_hash"
+        yp="$(state_yesterday_path "$M" "nsswitch_hash")"
+        if [ -n "$yp" ]; then
+            old_h="$(cat "$yp" 2>/dev/null)"
+            [ -n "$old_h" ] && [ "$h" != "$old_h" ] && \
+                log_finding "$M" "nsswitch_changed" "MEDIUM" \
+                    "/etc/nsswitch.conf 변경 — 이름 해석 정책 변조" "" 1
+        fi
+    fi
+
+    # ----- (4) 패키지 저장소 -----
+    case "$OS_FAMILY" in
+        rhel)
+            if [ -d /etc/yum.repos.d ]; then
+                find /etc/yum.repos.d -type f -name '*.repo' -print0 2>/dev/null \
+                    | xargs -0 -r sha256sum 2>/dev/null | sort | \
+                    state_save "$M" "yum_repos"
+                yp="$(state_yesterday_path "$M" "yum_repos")"
+                if [ -n "$yp" ]; then
+                    tp="$(state_path "$M" "yum_repos")"
+                    cmp -s "$yp" "$tp" || \
+                        log_finding "$M" "yum_repos_changed" "HIGH" \
+                            "yum repo 파일 변경 — 악성 패키지 저장소 주입 의심" "" 1
+                fi
+            fi
+            ;;
+        debian)
+            {
+                [ -f /etc/apt/sources.list ] && sha256sum /etc/apt/sources.list 2>/dev/null
+                if [ -d /etc/apt/sources.list.d ]; then
+                    find /etc/apt/sources.list.d -type f -print0 2>/dev/null \
+                        | xargs -0 -r sha256sum 2>/dev/null
+                fi
+            } | sort | state_save "$M" "apt_sources"
+            yp="$(state_yesterday_path "$M" "apt_sources")"
+            if [ -n "$yp" ]; then
+                tp="$(state_path "$M" "apt_sources")"
+                cmp -s "$yp" "$tp" || \
+                    log_finding "$M" "apt_sources_changed" "HIGH" \
+                        "apt sources 파일 변경 — 악성 패키지 저장소 주입 의심" "" 1
+            fi
+            ;;
+    esac
+
+    # ----- (5) 신뢰 CA 저장소 신규 파일 -----
+    # CA 디렉토리는 환경별로 다름. 각 디렉토리마다 별도 state.
+    local ca_dirs='' d key newca
+    case "$OS_FAMILY" in
+        rhel)   ca_dirs='/etc/pki/ca-trust/source/anchors' ;;
+        debian) ca_dirs='/usr/local/share/ca-certificates /etc/ssl/certs' ;;
+    esac
+    # shellcheck disable=SC2086
+    for d in $ca_dirs; do
+        [ -d "$d" ] || continue
+        key="ca_$(printf '%s' "$d" | tr '/' '_')"
+        find "$d" -maxdepth 3 -type f 2>/dev/null | sort -u | state_save "$M" "$key"
+        yp="$(state_yesterday_path "$M" "$key")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "$key")"
+            while IFS= read -r newca; do
+                [ -n "$newca" ] && \
+                    log_finding "$M" "new_ca_cert" "HIGH" \
+                        "신뢰 CA 저장소 신규 파일 — 가짜 CA 주입(MITM 인프라) 의심" \
+                        "$newca" 1
+            done < <(comm -13 "$yp" "$tp")
+        fi
+    done
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 22_mail_queue.sh — 메일 큐 (자동 skip)
+# ---------------------------------------------------------------------------
+# 보는 것: mailq 큐 크기, /var/spool/mqueue|postfix/active 파일 수
+# 왜: 공격자가 서버를 스팸 봇으로 이용하거나 백도어가 데이터를 메일로 유출하면
+#     큐에 쌓인다. 메일 서버가 없는 검사 대상 서버에서는 자동 skip.
+
+mod_22_mail_queue() {
+    local M='22_mail_queue'
+
+    # 사전 체크: 메일 발송 도구가 하나도 없으면 INFO 후 종료
+    if ! have_cmd postfix && ! have_cmd sendmail && ! have_cmd mailq; then
+        log_finding "$M" "no_mail_daemon" "INFO" \
+            "postfix/sendmail/mailq 모두 없음 — 메일 큐 점검 skip" "" 0
+        return 0
+    fi
+
+    # ----- mailq 큐 크기 -----
+    if have_cmd mailq; then
+        local q_tail q_size
+        # postfix:  "-- 0 Kbytes in 0 Requests."
+        # postfix2: "Mail queue is empty"
+        # sendmail: "/var/spool/mqueue is empty" / "Total requests: N"
+        q_tail="$(mailq 2>/dev/null | tail -2 | tr '\n' ' ')"
+        case "$q_tail" in
+            *empty*|*'0 Requests'*)
+                # 정상
+                ;;
+            *)
+                # 큐에 무언가 있을 때만 숫자 추출
+                q_size="$(printf '%s\n' "$q_tail" | grep -oE 'Requests?: *[0-9]+|in [0-9]+ Request' | grep -oE '[0-9]+' | head -1)"
+                if [ -n "$q_size" ] && [ "$q_size" -ge "$MAIL_QUEUE_THRESHOLD" ]; then
+                    log_finding "$M" "mailq_burst" "MEDIUM" \
+                        "메일 큐 ${q_size}건 (>= ${MAIL_QUEUE_THRESHOLD}) — 스팸 봇 또는 정상 폭주 가능" \
+                        "$q_tail" 0
+                fi
+                ;;
+        esac
+    fi
+
+    # ----- 스풀 디렉토리 파일 수 직접 카운트 -----
+    local d cnt
+    for d in /var/spool/mqueue /var/spool/postfix/active /var/spool/postfix/deferred; do
+        [ -d "$d" ] || continue
+        cnt="$(find "$d" -maxdepth 2 -type f 2>/dev/null | wc -l)"
+        if [ "$cnt" -ge "$MAIL_QUEUE_THRESHOLD" ]; then
+            log_finding "$M" "mail_spool_burst" "MEDIUM" \
+                "$d 파일 수 ${cnt} (>= ${MAIL_QUEUE_THRESHOLD}) — 큐 폭증" "" 0
+        fi
+    done
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 23_container.sh — 컨테이너 escape 위험 설정 (자동 skip)
+# ---------------------------------------------------------------------------
+# 보는 것: docker/podman 의 실행 중 컨테이너에서 Privileged=true 또는 호스트의
+#          민감 경로(/, /etc, /proc, /sys, docker.sock) 마운트
+# 왜: 이 두 설정은 컨테이너 escape 의 직행 경로. 정상 운영에서 거의 사용 X.
+
+mod_23_container() {
+    local M='23_container'
+
+    if ! have_cmd docker && ! have_cmd podman; then
+        log_finding "$M" "no_container_engine" "INFO" \
+            "docker/podman 없음 — 컨테이너 점검 skip" "" 0
+        return 0
+    fi
+
+    local engines=() engine cid img priv mounts pair src
+    have_cmd docker && engines+=(docker)
+    have_cmd podman && engines+=(podman)
+
+    for engine in "${engines[@]}"; do
+        # 실행 중 컨테이너 목록 (id, image)
+        while read -r cid img; do
+            [ -z "$cid" ] && continue
+
+            # ----- Privileged 검사 -----
+            priv="$("$engine" inspect --format '{{.HostConfig.Privileged}}' "$cid" 2>/dev/null)"
+            if [ "$priv" = 'true' ]; then
+                log_finding "$M" "privileged_container" "HIGH" \
+                    "$engine privileged 컨테이너 — 호스트 전체 권한, escape 직행 경로" \
+                    "id=${cid:0:12} image=$img" 0
+            fi
+
+            # ----- 위험 마운트 검사 -----
+            # 출력 형식: "src1:dst1 src2:dst2 ..."
+            mounts="$("$engine" inspect --format \
+                '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$cid" 2>/dev/null)"
+            # shellcheck disable=SC2086
+            for pair in $mounts; do
+                src="${pair%%:*}"
+                case "$src" in
+                    /|/etc|/etc/*|/proc|/proc/*|/sys|/sys/*|/root|/root/*|/var/run/docker.sock|/run/docker.sock|/var/run/containerd*|/run/containerd*)
+                        log_finding "$M" "dangerous_host_mount" "HIGH" \
+                            "$engine 컨테이너에 위험한 호스트 경로 마운트 — escape 가능" \
+                            "id=${cid:0:12} image=$img mount=$pair" 0
+                        ;;
+                esac
+            done
+        done < <("$engine" ps --filter 'status=running' --format '{{.ID}} {{.Image}}' 2>/dev/null)
+    done
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # 89_dispatch.sh — 모드별 점검 모듈 디스패처
 # ---------------------------------------------------------------------------
 # run_checks 는 main()(99_footer.sh) 에서 호출된다. 모드(daily/full)에 따라
