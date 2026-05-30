@@ -62,7 +62,10 @@ RESULT_JSON=''               # JSONL 상세 파일 경로
 FULL_LOG=''                  # 실행 로그 경로
 RUN_TS=''                    # 실행 시작 ISO8601
 RUN_EPOCH=0                  # 실행 시작 epoch (소요시간 계산용)
-BASELINE_MODE=0              # 1=첫 3일 학습 모드 (diff 검사 INFO 격하)
+# 가동 초기 안정화 기간(첫 8일). 콜드 영역이 7일에 한 바퀴 돌고 1일 마진까지
+# 끝나야 모든 diff 검사가 의미 있는 비교가 된다. 그 전까지는 diff 기반
+# HIGH/MEDIUM 발견을 INFO 로 격하해서 거짓 알람을 막는다.
+WARMUP_MODE=0
 
 # 심각도 카운터
 COUNT_HIGH=0

@@ -56,15 +56,17 @@ log() { _log_line "LOG" "$*"; }
 
 # 점검 발견 기록: log_finding <module> <check> <severity> <detail> [evidence] [diff_based]
 #   severity : HIGH | MEDIUM | LOW | INFO | ERROR
-#   diff_based: 1 이면 "어제 대비 변화" 기반 검사 → 첫 3일(BASELINE_MODE)엔 INFO 격하
+#   diff_based: 1 이면 "어제 대비 변화" 기반 검사 → 첫 8일(WARMUP_MODE)엔 INFO 격하
 log_finding() {
     local module="$1" check="$2" severity="$3" detail="$4"
     local evidence="${5:-}" diff_based="${6:-0}"
 
-    # baseline learning: 비교 대상이 부족한 초기엔 diff 기반 HIGH/MEDIUM 을 INFO 로 격하
-    if [ "$BASELINE_MODE" -eq 1 ] && [ "$diff_based" -eq 1 ]; then
+    # warmup: 가동 초기 안정화 기간엔 diff 기반 HIGH/MEDIUM 을 INFO 로 격하한다.
+    # 콜드 영역은 7일에 한 번씩만 점검되므로 첫 비교가 가능한 시점이 8일째.
+    # 그 전까지 alert 하면 거짓 알람이 폭증한다.
+    if [ "$WARMUP_MODE" -eq 1 ] && [ "$diff_based" -eq 1 ]; then
         case "$severity" in
-            HIGH|MEDIUM) detail="[baseline] $detail"; severity="INFO" ;;
+            HIGH|MEDIUM) detail="[warmup] $detail"; severity="INFO" ;;
         esac
     fi
 

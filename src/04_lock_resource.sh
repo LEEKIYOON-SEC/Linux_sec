@@ -137,12 +137,13 @@ determine_yesterday() {
         fi
     done
 
+    # 콜드 영역이 7일 한 바퀴 + 1일 마진까지 끝나야 모든 diff 가 의미 있는 비교가 된다.
     local count="${#dirs[@]}"
-    if [ "$count" -lt 3 ]; then
-        BASELINE_MODE=1
-        log "BASELINE_LEARNING 모드 (과거 결과 ${count}개 < 3) — diff 기반 HIGH/MEDIUM은 INFO 격하"
+    if [ "$count" -lt 8 ]; then
+        WARMUP_MODE=1
+        log "WARMUP_PERIOD 모드 (과거 결과 ${count}개 < 8) — diff 기반 HIGH/MEDIUM은 INFO 격하"
     else
-        BASELINE_MODE=0
+        WARMUP_MODE=0
     fi
 
     if [ -n "$YESTERDAY_DIR" ]; then

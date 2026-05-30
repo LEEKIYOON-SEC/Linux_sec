@@ -64,7 +64,10 @@ RESULT_JSON=''               # JSONL 상세 파일 경로
 FULL_LOG=''                  # 실행 로그 경로
 RUN_TS=''                    # 실행 시작 ISO8601
 RUN_EPOCH=0                  # 실행 시작 epoch (소요시간 계산용)
-BASELINE_MODE=0              # 1=첫 3일 학습 모드 (diff 검사 INFO 격하)
+# 가동 초기 안정화 기간(첫 8일). 콜드 영역이 7일에 한 바퀴 돌고 1일 마진까지
+# 끝나야 모든 diff 검사가 의미 있는 비교가 된다. 그 전까지는 diff 기반
+# HIGH/MEDIUM 발견을 INFO 로 격하해서 거짓 알람을 막는다.
+WARMUP_MODE=0
 
 # 심각도 카운터
 COUNT_HIGH=0
@@ -272,15 +275,17 @@ log() { _log_line "LOG" "$*"; }
 
 # 점검 발견 기록: log_finding <module> <check> <severity> <detail> [evidence] [diff_based]
 #   severity : HIGH | MEDIUM | LOW | INFO | ERROR
-#   diff_based: 1 이면 "어제 대비 변화" 기반 검사 → 첫 3일(BASELINE_MODE)엔 INFO 격하
+#   diff_based: 1 이면 "어제 대비 변화" 기반 검사 → 첫 8일(WARMUP_MODE)엔 INFO 격하
 log_finding() {
     local module="$1" check="$2" severity="$3" detail="$4"
     local evidence="${5:-}" diff_based="${6:-0}"
 
-    # baseline learning: 비교 대상이 부족한 초기엔 diff 기반 HIGH/MEDIUM 을 INFO 로 격하
-    if [ "$BASELINE_MODE" -eq 1 ] && [ "$diff_based" -eq 1 ]; then
+    # warmup: 가동 초기 안정화 기간엔 diff 기반 HIGH/MEDIUM 을 INFO 로 격하한다.
+    # 콜드 영역은 7일에 한 번씩만 점검되므로 첫 비교가 가능한 시점이 8일째.
+    # 그 전까지 alert 하면 거짓 알람이 폭증한다.
+    if [ "$WARMUP_MODE" -eq 1 ] && [ "$diff_based" -eq 1 ]; then
         case "$severity" in
-            HIGH|MEDIUM) detail="[baseline] $detail"; severity="INFO" ;;
+            HIGH|MEDIUM) detail="[warmup] $detail"; severity="INFO" ;;
         esac
     fi
 
@@ -604,12 +609,13 @@ determine_yesterday() {
         fi
     done
 
+    # 콜드 영역이 7일 한 바퀴 + 1일 마진까지 끝나야 모든 diff 가 의미 있는 비교가 된다.
     local count="${#dirs[@]}"
-    if [ "$count" -lt 3 ]; then
-        BASELINE_MODE=1
-        log "BASELINE_LEARNING 모드 (과거 결과 ${count}개 < 3) — diff 기반 HIGH/MEDIUM은 INFO 격하"
+    if [ "$count" -lt 8 ]; then
+        WARMUP_MODE=1
+        log "WARMUP_PERIOD 모드 (과거 결과 ${count}개 < 8) — diff 기반 HIGH/MEDIUM은 INFO 격하"
     else
-        BASELINE_MODE=0
+        WARMUP_MODE=0
     fi
 
     if [ -n "$YESTERDAY_DIR" ]; then
@@ -2437,7 +2443,7 @@ finalize_report() {
 # (1) SUMMARY.txt
 # ===========================================================================
 _report_summary_txt() {
-    local now elapsed elapsed_str status baseline_tag=''
+    local now elapsed elapsed_str status
     now="$(date '+%Y-%m-%d %H:%M:%S')"
     elapsed=$(( $(date +%s) - RUN_EPOCH ))
     if [ "$elapsed" -ge 60 ]; then
@@ -2450,12 +2456,13 @@ _report_summary_txt() {
     else
         status='CLEAN'
     fi
-    [ "$BASELINE_MODE" -eq 1 ] && baseline_tag=' BASELINE_LEARNING'
+    local warmup_tag=''
+    [ "$WARMUP_MODE" -eq 1 ] && warmup_tag=' WARMUP_PERIOD'
 
     printf '[%s] HIGH:%d MEDIUM:%d LOW:%d INFO:%d ERROR:%d ELAPSED:%s STATUS:%s%s HOST:%s MODE:%s\n' \
         "$now" \
         "$COUNT_HIGH" "$COUNT_MEDIUM" "$COUNT_LOW" "$COUNT_INFO" "$COUNT_ERROR" \
-        "$elapsed_str" "$status" "$baseline_tag" \
+        "$elapsed_str" "$status" "$warmup_tag" \
         "$SECCHK_HOSTNAME" "$MODE" \
         > "$TODAY_DIR/SUMMARY.txt"
 }
@@ -2546,8 +2553,8 @@ HEAD
     else
         printf '<div class="banner clean">✓ CLEAN — HIGH 발견 없음</div>\n' >> "$html"
     fi
-    if [ "$BASELINE_MODE" -eq 1 ]; then
-        printf '<div class="banner baseline">학습 모드: 과거 결과가 3개 미만이라 어제 비교 검사는 INFO 로 격하됩니다 (3일 후 자동 정상화)</div>\n' >> "$html"
+    if [ "$WARMUP_MODE" -eq 1 ]; then
+        printf '<div class="banner baseline">WARMUP_PERIOD: 가동 초기 안정화 기간 (과거 결과 8개 미만). 콜드 영역이 7일 한 바퀴 돌고 1일 마진까지 끝나야 모든 diff 가 의미 있는 비교가 되므로 그 전에는 diff 기반 HIGH/MEDIUM 을 INFO 로 격하합니다 (8일 후 자동 정상화).</div>\n' >> "$html"
     fi
 
     # 메타

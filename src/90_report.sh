@@ -29,7 +29,7 @@ finalize_report() {
 # (1) SUMMARY.txt
 # ===========================================================================
 _report_summary_txt() {
-    local now elapsed elapsed_str status baseline_tag=''
+    local now elapsed elapsed_str status
     now="$(date '+%Y-%m-%d %H:%M:%S')"
     elapsed=$(( $(date +%s) - RUN_EPOCH ))
     if [ "$elapsed" -ge 60 ]; then
@@ -42,12 +42,13 @@ _report_summary_txt() {
     else
         status='CLEAN'
     fi
-    [ "$BASELINE_MODE" -eq 1 ] && baseline_tag=' BASELINE_LEARNING'
+    local warmup_tag=''
+    [ "$WARMUP_MODE" -eq 1 ] && warmup_tag=' WARMUP_PERIOD'
 
     printf '[%s] HIGH:%d MEDIUM:%d LOW:%d INFO:%d ERROR:%d ELAPSED:%s STATUS:%s%s HOST:%s MODE:%s\n' \
         "$now" \
         "$COUNT_HIGH" "$COUNT_MEDIUM" "$COUNT_LOW" "$COUNT_INFO" "$COUNT_ERROR" \
-        "$elapsed_str" "$status" "$baseline_tag" \
+        "$elapsed_str" "$status" "$warmup_tag" \
         "$SECCHK_HOSTNAME" "$MODE" \
         > "$TODAY_DIR/SUMMARY.txt"
 }
@@ -138,8 +139,8 @@ HEAD
     else
         printf '<div class="banner clean">✓ CLEAN — HIGH 발견 없음</div>\n' >> "$html"
     fi
-    if [ "$BASELINE_MODE" -eq 1 ]; then
-        printf '<div class="banner baseline">학습 모드: 과거 결과가 3개 미만이라 어제 비교 검사는 INFO 로 격하됩니다 (3일 후 자동 정상화)</div>\n' >> "$html"
+    if [ "$WARMUP_MODE" -eq 1 ]; then
+        printf '<div class="banner baseline">WARMUP_PERIOD: 가동 초기 안정화 기간 (과거 결과 8개 미만). 콜드 영역이 7일 한 바퀴 돌고 1일 마진까지 끝나야 모든 diff 가 의미 있는 비교가 되므로 그 전에는 diff 기반 HIGH/MEDIUM 을 INFO 로 격하합니다 (8일 후 자동 정상화).</div>\n' >> "$html"
     fi
 
     # 메타
