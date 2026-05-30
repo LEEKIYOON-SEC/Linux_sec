@@ -15,7 +15,7 @@ mod_11_login_history() {
     # last 출력 예: "root  pts/0  192.168.1.10  Mon May 26 02:13 - 02:45  (00:32)"
     # 외부 IP 여부도 같이 본다.
     if have_cmd last; then
-        local night_total=0 night_external=0 line user tty host hh
+        local night_total=0 night_external=0 line user host hh
         while IFS= read -r line; do
             # 첫 토큰: 사용자명, 세 번째 토큰: host(IP 또는 hostname),
             # "Mon May 26 02:13" 중 시각 부분(HH:MM) 만 추출
@@ -48,7 +48,7 @@ mod_11_login_history() {
     # (2) 로그인 실패 폭주: 동일 IP/사용자가 임계 초과
     if have_cmd lastb; then
         # 권한 부족 시 stderr 만 나고 0 줄. 그건 정상.
-        local tmp top count addr_user
+        local tmp count addr_user
         tmp="$(mk_tmp)" || return 0
         lastb -F 2>/dev/null \
             | awk '$3!="" {print $1 " " $3}' \

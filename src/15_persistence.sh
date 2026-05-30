@@ -14,9 +14,7 @@ mod_15_persistence() {
     # /etc/crontab 와 cron.d / cron.hourly / daily / weekly / monthly,
     # 그리고 사용자별 /var/spool/cron 까지 합쳐 변경 여부 판정.
     {
-        for f in /etc/crontab; do
-            [ -f "$f" ] && sha256sum "$f" 2>/dev/null
-        done
+        [ -f /etc/crontab ] && sha256sum /etc/crontab 2>/dev/null
         for f in /etc/cron.d /etc/cron.hourly /etc/cron.daily \
                  /etc/cron.weekly /etc/cron.monthly /var/spool/cron; do
             [ -d "$f" ] || continue

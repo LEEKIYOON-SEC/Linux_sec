@@ -81,7 +81,6 @@ mod_13_process() {
 
     # (4) /proc/<pid>/maps 에 의심 위치 라이브러리 로딩 — 보강 E
     # LD_PRELOAD 우회 인젝션 / 임시 디렉토리 .so 로딩 탐지.
-    local maps
     for d in /proc/[0-9]*; do
         [ -d "$d" ] || continue
         pid="${d##*/}"

@@ -180,7 +180,7 @@ META
 
     # 모듈별 섹션
     if [ -s "$RESULT_JSON" ]; then
-        local module mcount sev rows line
+        local module mcount sev line
         while IFS= read -r module; do
             [ -z "$module" ] && continue
             mcount="$(grep -cE "\"module\":\"${module}\"" "$RESULT_JSON" 2>/dev/null || echo 0)"

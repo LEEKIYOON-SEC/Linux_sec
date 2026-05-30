@@ -780,7 +780,7 @@ mod_11_login_history() {
     # last 출력 예: "root  pts/0  192.168.1.10  Mon May 26 02:13 - 02:45  (00:32)"
     # 외부 IP 여부도 같이 본다.
     if have_cmd last; then
-        local night_total=0 night_external=0 line user tty host hh
+        local night_total=0 night_external=0 line user host hh
         while IFS= read -r line; do
             # 첫 토큰: 사용자명, 세 번째 토큰: host(IP 또는 hostname),
             # "Mon May 26 02:13" 중 시각 부분(HH:MM) 만 추출
@@ -813,7 +813,7 @@ mod_11_login_history() {
     # (2) 로그인 실패 폭주: 동일 IP/사용자가 임계 초과
     if have_cmd lastb; then
         # 권한 부족 시 stderr 만 나고 0 줄. 그건 정상.
-        local tmp top count addr_user
+        local tmp count addr_user
         tmp="$(mk_tmp)" || return 0
         lastb -F 2>/dev/null \
             | awk '$3!="" {print $1 " " $3}' \
@@ -1086,7 +1086,6 @@ mod_13_process() {
 
     # (4) /proc/<pid>/maps 에 의심 위치 라이브러리 로딩 — 보강 E
     # LD_PRELOAD 우회 인젝션 / 임시 디렉토리 .so 로딩 탐지.
-    local maps
     for d in /proc/[0-9]*; do
         [ -d "$d" ] || continue
         pid="${d##*/}"
@@ -1276,9 +1275,7 @@ mod_15_persistence() {
     # /etc/crontab 와 cron.d / cron.hourly / daily / weekly / monthly,
     # 그리고 사용자별 /var/spool/cron 까지 합쳐 변경 여부 판정.
     {
-        for f in /etc/crontab; do
-            [ -f "$f" ] && sha256sum "$f" 2>/dev/null
-        done
+        [ -f /etc/crontab ] && sha256sum /etc/crontab 2>/dev/null
         for f in /etc/cron.d /etc/cron.hourly /etc/cron.daily \
                  /etc/cron.weekly /etc/cron.monthly /var/spool/cron; do
             [ -d "$f" ] || continue
@@ -2595,7 +2592,7 @@ META
 
     # 모듈별 섹션
     if [ -s "$RESULT_JSON" ]; then
-        local module mcount sev rows line
+        local module mcount sev line
         while IFS= read -r module; do
             [ -z "$module" ] && continue
             mcount="$(grep -cE "\"module\":\"${module}\"" "$RESULT_JSON" 2>/dev/null || echo 0)"
