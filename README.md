@@ -1025,6 +1025,31 @@ sudo ./secchk.sh --mode daily
 
 `exit 1` (HIGH 발견 시) 또는 `0` (CLEAN) 또는 `2` (MEDIUM만)가 정상.
 
+### CLI 옵션 한눈에
+
+| 옵션 | 인자 | 기본값 | 설명 |
+|---|---|---|---|
+| `--os` | `auto` \| `rhel` \| `debian` | `auto` | OS 계열 지정. `auto` 는 `/etc/os-release` 로 감지. 감지 실패 시 수동 지정 |
+| `--mode` | `daily` \| `full` | `daily` | 점검 범위. `full` 은 콜드 영역 전체 (수동 점검 시) |
+| `--throttle` | 숫자(초) | `0.1` | 점검 항목 사이 sleep. `0` 으로 끄거나 `0.2` 로 더 분산 |
+| `--no-clamav` | (불리언 플래그) | OFF | ClamAV 점검 비활성 (기본은 활성) |
+| `--with-rkhunter` | (불리언 플래그) | OFF | rkhunter 점검 활성 (기본은 비활성) |
+| `--rotate-day` | `auto` \| `mon`..`sun` | `auto` | 콜드 영역 요일 강제. `auto` 는 오늘 요일 |
+| `--config` | 경로 | (자동 탐색) | 설정 파일 경로 명시. 없으면 `/etc/secchk.conf` → 스크립트 디렉토리 → 내장 기본값 순으로 탐색 |
+| `-h`, `--help` | — | — | 도움말 출력 후 종료 |
+| `-V`, `--version` | — | — | 버전 출력 후 종료 |
+
+### 종료 코드 한눈에
+
+| 코드 | 의미 | cron 동작 |
+|---|---|---|
+| `0` | `CLEAN` — HIGH 와 MEDIUM 모두 0 | 정상 |
+| `1` | `ALERT` — HIGH 1건 이상 | 정상 (운영자가 즉시 확인) |
+| `2` | `WARN` — MEDIUM 만 (HIGH 는 0) | 정상 (운영자 검토 권장) |
+| `10` | 모듈 실행 실패 (timeout, command not found 등 인프라 문제) | 정상 (가시성 목적) |
+| `20` | 설정 오류 (인자 오류, conf 파싱 실패, 디스크 부족) | 운영자 수정 필요 |
+| `30` | lock 획득 실패 (이전 인스턴스 진행 중) | 정상 (다음 cron 에서 재시도) |
+
 ---
 
 ## 17. 폴더 / 파일 레이아웃
