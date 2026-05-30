@@ -20,7 +20,7 @@ mod_25_rkhunter() {
     out="$(mk_tmp)" || return 0
     log "rkhunter 점검 시작 (timeout 600s)"
     # --report-warnings-only: 경고만 출력
-    # --no-mail-on-warning: 메일 시도 안 함 (본 도구는 외부 통신을 하지 않음)
+    # --no-mail-on-warning: 메일 시도 안 함 (secchk 는 외부 통신을 하지 않음)
     # --skip-keypress: 대화형 입력 없이 진행
     timeout 600 rkhunter --check \
         --skip-keypress --quiet --report-warnings-only --no-mail-on-warning \
