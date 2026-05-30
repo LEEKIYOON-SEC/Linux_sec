@@ -8,7 +8,11 @@
 
 _print_console_summary() {
     local status='CLEAN'
-    [ "$COUNT_HIGH" -gt 0 ] && status='ALERT'
+    if [ "$COUNT_HIGH" -gt 0 ]; then
+        status='ALERT'
+    elif [ "$COUNT_MEDIUM" -gt 0 ]; then
+        status='WARN'
+    fi
     local now elapsed
     now="$(date +%s)"
     elapsed=$(( now - RUN_EPOCH ))

@@ -40,7 +40,7 @@ new[[:space:]]+ProcessBuilder[[:space:]]*\(
 # --- JSP: 동적 클래스 로딩 백도어 패턴 ---
 ClassLoader\.getSystemClassLoader\(\)\.loadClass
 
-# --- ASP: WScript.Shell 객체 (정상 ASP 에서도 쓰이긴 하나 망분리 운영 서버에서는 의심) ---
+# --- ASP: WScript.Shell 객체 (정상 ASP 에서도 쓰이지만, 일반 운영 서버 코드에선 드뭄) ---
 Server\.CreateObject[[:space:]]*\([[:space:]]*["'](WScript\.Shell|Shell\.Application|Scripting\.FileSystemObject)
 
 # --- ASPX/ASP: 사용자 입력을 곧장 Process.Start 등에 넘기는 패턴 ---

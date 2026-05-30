@@ -5,7 +5,7 @@
 # main() 이 finalize_report 를 declare -F 로 확인 후 호출한다.
 # 산출물:
 #   SUMMARY.txt              매일 한 줄 (운영자가 가장 먼저 보는 파일)
-#   report.html              브라우저용. 외부 CSS/JS 0 (망분리 안전)
+#   report.html              브라우저용. 외부 CSS/JS 0 (오프라인에서도 그대로 열림)
 #   diff_from_yesterday.txt  어제와 오늘의 발견 차이
 #   result.json              모듈이 append 한 JSONL (이 파일은 그대로 유지)
 #   ../SUMMARY_INDEX.txt     일자별 누적 (output/ 루트에 위치)
@@ -39,6 +39,8 @@ _report_summary_txt() {
     fi
     if [ "$COUNT_HIGH" -gt 0 ]; then
         status='ALERT'
+    elif [ "$COUNT_MEDIUM" -gt 0 ]; then
+        status='WARN'
     else
         status='CLEAN'
     fi
@@ -79,7 +81,13 @@ _report_html() {
     local now elapsed status
     now="$(date '+%Y-%m-%d %H:%M:%S')"
     elapsed=$(( $(date +%s) - RUN_EPOCH ))
-    if [ "$COUNT_HIGH" -gt 0 ]; then status='ALERT'; else status='CLEAN'; fi
+    if [ "$COUNT_HIGH" -gt 0 ]; then
+        status='ALERT'
+    elif [ "$COUNT_MEDIUM" -gt 0 ]; then
+        status='WARN'
+    else
+        status='CLEAN'
+    fi
 
     cat > "$html" <<'HEAD'
 <!DOCTYPE html>
@@ -95,6 +103,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,san
 h1{margin:0 0 16px}
 .banner{padding:14px 20px;border-radius:6px;margin-bottom:16px;font-weight:600;color:white}
 .banner.alert{background:#c0392b}
+.banner.warn{background:#e67e22}
 .banner.clean{background:#27ae60}
 .banner.baseline{background:#e67e22;font-weight:400}
 .meta{background:white;padding:16px 20px;border-radius:6px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
@@ -134,10 +143,13 @@ code{background:#f3f3f5;padding:1px 6px;border-radius:3px;font-size:.9em}
 HEAD
 
     if [ "$status" = 'ALERT' ]; then
-        printf '<div class="banner alert">⚠ HIGH 발견 %d건 — 즉시 확인 필요</div>\n' \
+        printf '<div class="banner alert">⚠ ALERT — HIGH 발견 %d건. 즉시 확인 필요.</div>\n' \
             "$COUNT_HIGH" >> "$html"
+    elif [ "$status" = 'WARN' ]; then
+        printf '<div class="banner warn">⚠ WARN — MEDIUM 발견 %d건. 검토 필요.</div>\n' \
+            "$COUNT_MEDIUM" >> "$html"
     else
-        printf '<div class="banner clean">✓ CLEAN — HIGH 발견 없음</div>\n' >> "$html"
+        printf '<div class="banner clean">✓ CLEAN — HIGH/MEDIUM 발견 없음.</div>\n' >> "$html"
     fi
     if [ "$WARMUP_MODE" -eq 1 ]; then
         printf '<div class="banner baseline">WARMUP_PERIOD: 가동 초기 안정화 기간 (과거 결과 8개 미만). 콜드 영역이 7일 한 바퀴 돌고 1일 마진까지 끝나야 모든 diff 가 의미 있는 비교가 되므로 그 전에는 diff 기반 HIGH/MEDIUM 을 INFO 로 격하합니다 (8일 후 자동 정상화).</div>\n' >> "$html"
@@ -206,7 +218,7 @@ META
 
     # 푸터
     cat >> "$html" <<'FOOT'
-<div class="foot">secchk — 망분리 환경 침해흔적 점검 (외부 통신 없음)</div>
+<div class="foot">secchk — Linux 서버 침해흔적 점검 (외부 통신 없이 단독 동작)</div>
 </div>
 </body>
 </html>
