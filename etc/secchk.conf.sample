@@ -1,0 +1,78 @@
+# secchk.conf — secchk.sh 설정 파일 (샘플)
+#
+# 이 파일은 셸이 source 로 읽습니다. KEY="VALUE" 형식의 셸 변수로 작성하세요.
+# 운영 시에는 이 파일을 다음 중 한 곳에 두면 자동으로 로드됩니다.
+#   1) --config <경로> 로 명시
+#   2) /etc/secchk.conf
+#   3) secchk.sh 와 같은 디렉토리의 secchk.conf
+# 아무 것도 없으면 스크립트 내장 기본값을 사용합니다.
+#
+# 서버 특성에 맞게 수정해서 사용하세요. (예: 웹 서버면 WEB_ROOTS 에 실제 경로 추가)
+
+# ---------------------------------------------------------------------------
+# 점검 대상 디렉토리 — 핫스팟 / 콜드(요일별)
+# ---------------------------------------------------------------------------
+# 14_file_anomaly 와 24_clamav 가 공유합니다.
+#
+#  - HOTSPOTS    : 공격 표적 1순위 + 변동이 잦은 곳. "매일" 점검.
+#  - ROTATE_<요일>: 변동이 적은 시스템 영역. "요일별 1/7"씩 점검(7일에 한 바퀴).
+#
+# 핫스팟 매일 + 콜드 7일 순회 = 일주일이면 전 영역을 한 번씩 커버합니다.
+
+HOTSPOTS="/tmp /dev/shm /var/tmp /var/www /usr/share/nginx /opt/tomcat/webapps"
+
+ROTATE_Mon="/etc"
+ROTATE_Tue="/usr/bin /bin"
+ROTATE_Wed="/usr/sbin /sbin"
+ROTATE_Thu="/home"
+ROTATE_Fri="/root /opt"
+ROTATE_Sat="/usr/local /srv"
+ROTATE_Sun="/var/spool /var/lib"
+
+# 웹쉘 점검 대상 웹 루트 (17_webshell)
+WEB_ROOTS="/var/www /usr/share/nginx/html /opt/tomcat/webapps"
+
+# ---------------------------------------------------------------------------
+# 신뢰 외부 DNS (21_network_config)
+# ---------------------------------------------------------------------------
+# 사내 DNS 는 사설망 IP(10/172.16-31/192.168 대역)라 자동 신뢰됩니다.
+# 외부 공용 DNS(8.8.8.8 등)를 정상 운영에 사용하는 환경에서만 그 IP 를 등록하세요.
+# 그 외에는 빈 값으로 둡니다.
+TRUSTED_DNS=""
+
+# ---------------------------------------------------------------------------
+# 결과 보관 / 자원
+# ---------------------------------------------------------------------------
+# 결과 디렉토리 보관 일수. 초과분은 자동 삭제(HIGH 발견 일자는 .preserved 로 보존).
+KEEP_DAYS=30
+
+# 시작 시 출력 파티션 여유가 이 값(MB) 미만이면 점검을 중단합니다(디스크 보호).
+MIN_FREE_MB=1024
+
+# 점검 항목/모듈 사이 sleep(초). 부하 분산용. --throttle 인자로도 덮어쓸 수 있습니다.
+THROTTLE_SLEEP=0.1
+
+# 출력 루트를 고정하고 싶을 때 지정(기본: secchk.sh 옆 output/).
+#OUTPUT_BASE_CONF="/var/log/secchk/output"
+
+# 24_clamav 가 서브셸에서 거는 가상메모리 상한(KB). ClamAV OOM 방지.
+CLAMAV_MAX_VMEM_KB=1500000
+
+# ---------------------------------------------------------------------------
+# 임계값
+# ---------------------------------------------------------------------------
+# 동일 IP 로그인 실패가 하루 이 횟수를 넘으면 보고(11_login_history).
+FAILED_LOGIN_THRESHOLD=20
+
+# 메일 큐 대기 건수가 이 값을 넘으면 보고(22_mail_queue).
+MAIL_QUEUE_THRESHOLD=100
+
+# ---------------------------------------------------------------------------
+# 핵심 패키지 풀 검증 (20_system_integrity)
+# ---------------------------------------------------------------------------
+# 일반 무결성 검사(rpm -Va / debsums -ac)에서 잡혀도 MEDIUM 으로만 보고되는
+# 무결성 mismatch 중, "이 패키지의 파일이 변조되면 거의 확실히 침해" 인
+# 시스템 명령어 패키지를 별도로 풀 검증하여 HIGH 로 보고합니다.
+# 보호하고 싶은 명령(예: curl, sudo, audit)이 있으면 해당 패키지명을 추가하세요.
+CORE_PKGS_RHEL="coreutils util-linux procps-ng net-tools iproute openssh-server openssh-clients shadow-utils pam"
+CORE_PKGS_DEBIAN="coreutils util-linux procps net-tools iproute2 openssh-server openssh-client login libpam-modules libpam-runtime"
