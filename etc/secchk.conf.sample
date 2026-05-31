@@ -66,3 +66,13 @@ FAILED_LOGIN_THRESHOLD=20
 
 # 메일 큐 대기 건수가 이 값을 넘으면 보고(22_mail_queue).
 MAIL_QUEUE_THRESHOLD=100
+
+# ---------------------------------------------------------------------------
+# 핵심 패키지 풀 검증 (20_system_integrity)
+# ---------------------------------------------------------------------------
+# 일반 무결성 검사(rpm -Va / debsums -ac)에서 잡혀도 MEDIUM 으로만 보고되는
+# 무결성 mismatch 중, "이 패키지의 파일이 변조되면 거의 확실히 침해" 인
+# 시스템 명령어 패키지를 별도로 풀 검증하여 HIGH 로 보고합니다.
+# 보호하고 싶은 명령(예: curl, sudo, audit)이 있으면 해당 패키지명을 추가하세요.
+CORE_PKGS_RHEL="coreutils util-linux procps-ng net-tools iproute openssh-server openssh-clients shadow-utils pam"
+CORE_PKGS_DEBIAN="coreutils util-linux procps net-tools iproute2 openssh-server openssh-client login libpam-modules libpam-runtime"

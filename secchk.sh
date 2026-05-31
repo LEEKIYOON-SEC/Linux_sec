@@ -93,6 +93,12 @@ ROTATE_Fri='/root /opt'
 ROTATE_Sat='/usr/local /srv'
 ROTATE_Sun='/var/spool /var/lib'
 
+# 20_system_integrity 가 풀 검증할 핵심 패키지 목록 (OS 계열별).
+# 일반 검사(rpm -Va / debsums -ac)에서 노이즈로 묻힐 수 있는 시스템 명령어를
+# 별도로 강하게(HIGH) 검증한다. 보호하고 싶은 명령이 있으면 해당 패키지를 추가.
+CORE_PKGS_RHEL='coreutils util-linux procps-ng net-tools iproute openssh-server openssh-clients shadow-utils pam'
+CORE_PKGS_DEBIAN='coreutils util-linux procps net-tools iproute2 openssh-server openssh-client login libpam-modules libpam-runtime'
+
 # 임시 파일 추적 (cleanup 에서 제거)
 declare -a SECCHK_TMPFILES=()
 
@@ -1806,8 +1812,12 @@ mod_19_kernel_module() {
 # 왜: 공격자가 ls/ps/ss/sshd 등을 trojan 으로 교체하면 운영자가 보는 모든 결과가
 #     거짓이 된다. 배포판 메이커가 서명한 해시는 침해된 서버에서도 신뢰 가능.
 #
-# 부하 주의: rpm -Va 와 debsums -ce 는 디스크 전체를 읽어 시간이 걸린다.
+# 부하 주의: rpm -Va / debsums -ac 는 디스크 전체를 읽어 시간이 걸린다.
 # idle priority 와 timeout 가드(180초) 로 운영 영향을 제한한다.
+#
+# RHEL 과 Debian 양쪽 모두 "전 파일 + 변경된 것만" 으로 대칭화:
+#   RHEL   : rpm -Va  (전 파일) → 5/S(checksum/size) 만, c/d/g/l/r 필터링
+#   Debian : debsums -ac (전 파일 + config 포함, 변경된 것만)
 
 mod_20_system_integrity() {
     local M='20_system_integrity'
@@ -1862,7 +1872,7 @@ mod_20_system_integrity() {
             state_save "$M" "rpm_mismatch" < "$mismatch"
 
             # 핵심 패키지 풀 검증 — 여기서 mismatch 가 잡히면 거의 확실히 침해
-            core_pkgs='coreutils util-linux procps-ng net-tools iproute openssh-server openssh-clients shadow-utils pam'
+            core_pkgs="${CORE_PKGS_RHEL}"
             # shellcheck disable=SC2086
             core_out="$(timeout 60 rpm -V $core_pkgs 2>/dev/null | head -50)"
             if [ -n "$core_out" ]; then
@@ -1880,9 +1890,10 @@ mod_20_system_integrity() {
                 return 0
             fi
 
-            # debsums -ce: changed config + 일반 파일 변경 모두 출력 (실패한 항목)
+            # debsums -ac: -a(config 포함) + -c(변경된 것만). RHEL rpm -Va 와 대칭.
+            # 일반 바이너리(/usr/bin/ls 등) 변조도 여기서 잡힌다.
             out="$(mk_tmp)" || return 0
-            timeout 180 debsums -ce 2>/dev/null | sort -u > "$out" || true
+            timeout 180 debsums -ac 2>/dev/null | sort -u > "$out" || true
 
             cnt="$(wc -l < "$out")"
             if [ "$cnt" -gt 0 ]; then
@@ -1901,7 +1912,7 @@ mod_20_system_integrity() {
             state_save "$M" "debsums_mismatch" < "$out"
 
             # 핵심 패키지 풀 검증
-            core_pkgs='coreutils util-linux procps net-tools iproute2 openssh-server openssh-client login libpam-modules libpam-runtime'
+            core_pkgs="${CORE_PKGS_DEBIAN}"
             # shellcheck disable=SC2086
             core_out="$(timeout 60 debsums $core_pkgs 2>/dev/null | grep -v 'OK$' | head -50)"
             if [ -n "$core_out" ]; then

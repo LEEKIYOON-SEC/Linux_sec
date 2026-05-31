@@ -285,6 +285,11 @@ CLAMAV_MAX_VMEM_KB=1500000   # ClamAV 메모리 상한 (1.5GB)
 # ─── 임계값 ──────────────────────────────────────────────
 FAILED_LOGIN_THRESHOLD=20    # 동일 IP 로그인 실패 임계
 MAIL_QUEUE_THRESHOLD=100     # 메일 큐 임계
+
+# ─── 핵심 패키지 풀 검증 (20_system_integrity) ────────────
+# 변조되면 거의 확실히 침해인 시스템 명령어 패키지. 보호 대상 추가 시 여기에.
+CORE_PKGS_RHEL="coreutils util-linux procps-ng net-tools iproute openssh-server openssh-clients shadow-utils pam"
+CORE_PKGS_DEBIAN="coreutils util-linux procps net-tools iproute2 openssh-server openssh-client login libpam-modules libpam-runtime"
 ```
 
 ### 핫스팟 / 콜드 분할이란?
@@ -565,11 +570,11 @@ LKM(Loadable Kernel Module) 루트킷은 커널 영역에서 동작하므로 사
 ### 20_system_integrity — 패키지 무결성
 
 **무엇을 보나요?**
-- RHEL: `rpm -Va`로 설치된 모든 패키지 파일이 정상 해시와 일치하는지 (config 등 예상 변경은 필터링)
-- Ubuntu: `debsums -ce`로 변경된 **설정 파일**을 점검
-- 두 계열 공통으로, 시스템 핵심 패키지(`coreutils`, `util-linux`, `openssh-*`, `pam` 등)는 **모든 파일을 별도 풀 검증** → 일반 바이너리(`ls`, `ps`, `ss` 등) 변조도 여기서 HIGH로 탐지
+- RHEL: `rpm -Va` — 설치된 **모든 패키지의 모든 파일**을 정상 해시와 비교. checksum/size mismatch만, config/doc/ghost 등은 필터링 → MEDIUM
+- Ubuntu: `debsums -ac` — 설치된 **모든 패키지의 모든 파일**(config 포함) 중 변경된 것만 출력 → MEDIUM
+- 두 계열 공통으로, 시스템 핵심 패키지(`CORE_PKGS_*`에 정의된 `coreutils`, `util-linux`, `openssh-*`, `pam` 등)는 **별도 풀 검증**해서 mismatch가 있으면 **HIGH** (시스템 명령 변조는 거의 확실히 침해)
 
-> 참고: RHEL의 `rpm -Va`는 전 패키지의 모든 파일을 보지만, Ubuntu의 `debsums -ce`는 설정 파일 위주입니다. 그래서 Ubuntu에서 핵심 패키지 밖의 일반 바이너리 변조 탐지는 핵심 패키지 풀 검증 목록에 의존합니다. 보호하려는 명령이 더 있으면 코드의 `core_pkgs` 목록에 추가하세요.
+운영자가 보호 대상을 더 추가하고 싶으면 `secchk.conf`의 `CORE_PKGS_RHEL` / `CORE_PKGS_DEBIAN`에 패키지명을 추가하면 됩니다. 예) `curl`, `sudo`, `audit` 등.
 
 **왜 봐야 하나요?**
 공격자가 `ls`, `ps`, `ss`, `sshd` 같은 시스템 명령어를 **trojan 버전으로 교체**하면 운영자가 보는 모든 결과가 거짓이 됩니다. 다행히 배포판 패키지에는 메이커가 서명한 정상 해시가 들어 있어, 이를 기준으로 변조 여부를 신뢰성 있게 확인할 수 있습니다. 이미 침해된 서버에서도 동작하는 강력한 검증법입니다.
@@ -693,10 +698,10 @@ ClamAV와 다른 시그니처 DB를 사용하므로 보조 검증 레이어가 �
 | 신규 SSH authorized_key | 16 (new_ssh_key) |
 | 더미 웹쉘 (eval base64_decode) | 17 (webshell_pattern_match) |
 | 로그 파일 0바이트 + 사이즈 감소 | 18 (log_zero_size × 2 + log_size_decreased) |
-| `/bin/ls` 변조 | 20 (core_pkg_mismatch — 핵심 패키지 변조 HIGH) |
+| `/bin/ls` 변조 | 20 (debsums_mismatch MEDIUM + core_pkg_mismatch HIGH) |
 | `/etc/hosts` 외부 매핑 + 가짜 CA | 21 (hosts_external_mapping + new_ca_cert) |
 
-→ 12종 침해가 9개 모듈에서 **HIGH 18건**으로 탐지되어 STATUS:ALERT. (MEDIUM 건수는 서버 상태에 따라 달라집니다 — 위 캡처 환경에서는 5~6건.) **12종 모두 탐지**.
+→ 총 **HIGH 18 + MEDIUM 6 = STATUS:ALERT**. 12종 침해가 9개 모듈에서 모두 탐지됩니다.
 
 ---
 

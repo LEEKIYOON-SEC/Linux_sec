@@ -91,6 +91,12 @@ ROTATE_Fri='/root /opt'
 ROTATE_Sat='/usr/local /srv'
 ROTATE_Sun='/var/spool /var/lib'
 
+# 20_system_integrity 가 풀 검증할 핵심 패키지 목록 (OS 계열별).
+# 일반 검사(rpm -Va / debsums -ac)에서 노이즈로 묻힐 수 있는 시스템 명령어를
+# 별도로 강하게(HIGH) 검증한다. 보호하고 싶은 명령이 있으면 해당 패키지를 추가.
+CORE_PKGS_RHEL='coreutils util-linux procps-ng net-tools iproute openssh-server openssh-clients shadow-utils pam'
+CORE_PKGS_DEBIAN='coreutils util-linux procps net-tools iproute2 openssh-server openssh-client login libpam-modules libpam-runtime'
+
 # 임시 파일 추적 (cleanup 에서 제거)
 declare -a SECCHK_TMPFILES=()
 
