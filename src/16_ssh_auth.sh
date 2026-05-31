@@ -53,7 +53,7 @@ mod_16_ssh_auth() {
         sshd_today="$(mk_tmp)" || return 0
         sshd -T 2>/dev/null \
             | awk 'tolower($1) ~ /^(permitrootlogin|passwordauthentication|allowusers|allowgroups|denyusers|denygroups|port|permitemptypasswords|pubkeyauthentication|usepam|authorizedkeysfile|challengeresponseauthentication|kbdinteractiveauthentication)$/' \
-            | tr 'A-Z' 'a-z' | sort -u > "$sshd_today"
+            | tr '[:upper:]' '[:lower:]' | sort -u > "$sshd_today"
         if [ -s "$sshd_today" ]; then
             state_save "$M" "sshd_config" < "$sshd_today"
             yp="$(state_yesterday_path "$M" "sshd_config")"
