@@ -15,11 +15,11 @@ readonly OUT='secchk.sh'
 
 mapfile -t files < <(find "$SRC_DIR" -maxdepth 1 -type f -name '[0-9][0-9]_*.sh' | sort)
 if [ "${#files[@]}" -eq 0 ]; then
-    echo "build: $SRC_DIR 에 모듈이 없습니다" >&2
+    echo "build: $SRC_DIR 에 모듈 없음" >&2
     exit 1
 fi
 if [ ! -f "$SRC_DIR/00_header.sh" ]; then
-    echo "build: $SRC_DIR/00_header.sh 가 필요합니다" >&2
+    echo "build: $SRC_DIR/00_header.sh 누락" >&2
     exit 1
 fi
 

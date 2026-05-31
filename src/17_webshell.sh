@@ -7,7 +7,8 @@
 # 왜: WAF 는 HTTP 요청만 보는데, 웹쉘은 이미 업로드된 후엔 그 트래픽이 정상 처리로
 #     보인다. 디스크에 남은 파일을 정기적으로 스캔하는 게 유일한 사후 탐지 수단.
 #
-# baseline diff 가 아닌 단순 패턴 매칭이므로 매칭 자체가 HIGH (diff_based=0).
+# 어제 vs 오늘 diff 가 아닌 단순 패턴 매칭이므로 매칭 자체가 HIGH (diff_based=0,
+# WARMUP_PERIOD 와 무관하게 첫날부터 격하 없이 보고).
 # 정상 코드에서 우연히 매칭되면 운영자가 webshell_regex.txt 의 해당 줄을 좁히거나,
 # secchk.conf 의 WEB_ROOTS 에서 그 영역을 제외한다.
 

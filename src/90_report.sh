@@ -105,7 +105,7 @@ h1{margin:0 0 16px}
 .banner.alert{background:#c0392b}
 .banner.warn{background:#e67e22}
 .banner.clean{background:#27ae60}
-.banner.baseline{background:#e67e22;font-weight:400}
+.banner.warmup{background:#e67e22;font-weight:400}
 .meta{background:white;padding:16px 20px;border-radius:6px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
 .meta dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}
 .meta dt{color:#666;font-weight:600}
@@ -152,7 +152,7 @@ HEAD
         printf '<div class="banner clean">✓ CLEAN — HIGH/MEDIUM 발견 없음.</div>\n' >> "$html"
     fi
     if [ "$WARMUP_MODE" -eq 1 ]; then
-        printf '<div class="banner baseline">WARMUP_PERIOD: 가동 초기 안정화 기간 (과거 결과 8개 미만). 콜드 영역이 7일 한 바퀴 돌고 1일 마진까지 끝나야 모든 diff 가 의미 있는 비교가 되므로 그 전에는 diff 기반 HIGH/MEDIUM 을 INFO 로 격하합니다 (8일 후 자동 정상화).</div>\n' >> "$html"
+        printf '<div class="banner warmup">WARMUP_PERIOD — 가동 초기 안정화 기간 (과거 결과 8개 미만). 콜드 영역이 7일 한 바퀴 + 1일 마진까지 끝나기 전까지 diff 기반 HIGH/MEDIUM 은 INFO 로 격하. 8일 후 자동 정상화.</div>\n' >> "$html"
     fi
 
     # 메타

@@ -4,18 +4,18 @@
 #
 # secchk.sh — Linux 서버 침해흔적 점검 스크립트
 #
-# 이 파일은 src/*.sh 모듈을 build.sh가 번호 순서대로 합쳐 생성한 단일 산출물의
-# 헤더입니다. 개발은 src/ 아래 모듈 단위로 하고, 배포는 secchk.sh 한 파일로 합니다.
-#
-# 사용법은 --help 참조. 외부 통신 없이 동작하며 결과는 output/ 에 로컬 저장합니다.
+# build.sh 가 src/*.sh 모듈을 번호 순서대로 합쳐 만든 단일 산출물.
+# 개발은 src/ 모듈 단위로 하고 배포는 secchk.sh 한 파일로 한다.
+# 외부 통신 없이 동작하며 결과는 output/ 에 로컬 저장.
+# 사용법은 --help 참조.
 #
 # ---------------------------------------------------------------------------
 # 셸 옵션
 # ---------------------------------------------------------------------------
-# set -e 는 의도적으로 쓰지 않습니다. 점검 스크립트는 grep/find 등이 "매치 없음"
-# 으로 exit 1 을 반환하는 경우가 정상 흐름인데, set -e 면 거기서 죽어버립니다.
+# set -e 는 의도적으로 쓰지 않는다. 점검 스크립트는 grep/find 등이 "매치 없음"
+# 으로 exit 1 을 반환하는 경우가 정상 흐름인데, set -e 면 거기서 죽어버린다.
 # 대신 set -u(미정의 변수 차단) + pipefail(파이프 실패 감지)만 쓰고, 모듈 실행은
-# run_module 래퍼로 격리하여 한 모듈이 실패해도 전체 점검은 계속되게 합니다.
+# run_module 래퍼로 격리하여 한 모듈이 실패해도 전체 점검은 계속되게 한다.
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
@@ -23,8 +23,8 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 # 공격자가 root 권한 획득 후 ~/.bashrc, /etc/bash.bashrc, 환경변수 등에 가짜
 # 명령어(alias 또는 PATH 앞단의 trojan 바이너리)를 끼워 넣어 점검 결과를 위조하는
-# 시나리오를 차단합니다. 핵심 명령은 신뢰된 절대 경로에서만 찾도록 강제합니다.
-# (바이너리 자체가 교체된 경우는 20_system_integrity 의 rpm -V / debsums 가 잡습니다.)
+# 시나리오를 차단한다. 핵심 명령은 신뢰된 절대 경로에서만 찾도록 강제한다.
+# (바이너리 자체가 교체된 경우는 20_system_integrity 의 rpm -V / debsums 가 잡는다.)
 \unalias -a 2>/dev/null || true
 unset -f ps ss ls find grep awk sed cat stat sort comm xargs 2>/dev/null || true
 export PATH='/usr/sbin:/usr/bin:/sbin:/bin'
@@ -135,23 +135,23 @@ USAGE
 # ---------------------------------------------------------------------------
 # 01_args.sh — 명령행 인자 파싱
 # ---------------------------------------------------------------------------
-# 전역 옵션 변수(00_header.sh 정의)를 덮어씁니다. 잘못된 인자는 exit 20.
+# 전역 옵션 변수(00_header.sh 정의)를 덮어쓴다. 잘못된 인자는 exit 20.
 
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --os)
-                [ $# -ge 2 ] || _arg_err "--os 에 값이 필요합니다"
+                [ $# -ge 2 ] || _arg_err "--os 값 누락"
                 OS_OVERRIDE="$2"; shift 2 ;;
             --os=*)
                 OS_OVERRIDE="${1#*=}"; shift ;;
             --mode)
-                [ $# -ge 2 ] || _arg_err "--mode 에 값이 필요합니다"
+                [ $# -ge 2 ] || _arg_err "--mode 값 누락"
                 MODE="$2"; shift 2 ;;
             --mode=*)
                 MODE="${1#*=}"; shift ;;
             --throttle)
-                [ $# -ge 2 ] || _arg_err "--throttle 에 값이 필요합니다"
+                [ $# -ge 2 ] || _arg_err "--throttle 값 누락"
                 THROTTLE_SLEEP="$2"; shift 2 ;;
             --throttle=*)
                 THROTTLE_SLEEP="${1#*=}"; shift ;;
@@ -160,12 +160,12 @@ parse_args() {
             --with-rkhunter)
                 ENABLE_RKHUNTER=1; shift ;;
             --rotate-day)
-                [ $# -ge 2 ] || _arg_err "--rotate-day 에 값이 필요합니다"
+                [ $# -ge 2 ] || _arg_err "--rotate-day 값 누락"
                 ROTATE_DAY="$2"; shift 2 ;;
             --rotate-day=*)
                 ROTATE_DAY="${1#*=}"; shift ;;
             --config)
-                [ $# -ge 2 ] || _arg_err "--config 에 값이 필요합니다"
+                [ $# -ge 2 ] || _arg_err "--config 값 누락"
                 CONFIG_FILE="$2"; shift 2 ;;
             --config=*)
                 CONFIG_FILE="${1#*=}"; shift ;;
@@ -195,26 +195,26 @@ _arg_err() {
 _validate_args() {
     case "$OS_OVERRIDE" in
         auto|rhel|debian) ;;
-        *) _arg_err "--os 는 auto|rhel|debian 중 하나여야 합니다 (받음: $OS_OVERRIDE)" ;;
+        *) _arg_err "--os 잘못된 값: $OS_OVERRIDE (auto|rhel|debian 중 하나)" ;;
     esac
 
     case "$MODE" in
         daily|full) ;;
-        *) _arg_err "--mode 는 daily|full 중 하나여야 합니다 (받음: $MODE)" ;;
+        *) _arg_err "--mode 잘못된 값: $MODE (daily|full 중 하나)" ;;
     esac
 
     # throttle: 음수 아닌 숫자 (소수 허용)
     case "$THROTTLE_SLEEP" in
-        ''|*[!0-9.]*) _arg_err "--throttle 은 숫자여야 합니다 (받음: $THROTTLE_SLEEP)" ;;
+        ''|*[!0-9.]*) _arg_err "--throttle 잘못된 값: $THROTTLE_SLEEP (숫자여야 함)" ;;
     esac
 
     case "$ROTATE_DAY" in
         auto|mon|tue|wed|thu|fri|sat|sun) ;;
-        *) _arg_err "--rotate-day 는 auto|mon..sun 중 하나여야 합니다 (받음: $ROTATE_DAY)" ;;
+        *) _arg_err "--rotate-day 잘못된 값: $ROTATE_DAY (auto|mon..sun 중 하나)" ;;
     esac
 
     if [ -n "$CONFIG_FILE" ] && [ ! -r "$CONFIG_FILE" ]; then
-        _arg_err "--config 파일을 읽을 수 없습니다: $CONFIG_FILE"
+        _arg_err "--config 파일을 읽을 수 없음: $CONFIG_FILE"
     fi
 }
 
@@ -354,7 +354,7 @@ run_module() {
 # 모듈별 상태 저장 / 비교 (어제 vs 오늘 diff)
 # ---------------------------------------------------------------------------
 # 모듈이 자기 점검 결과(정렬된 텍스트)를 $TODAY_DIR/state/<module>/<key> 에 저장하면,
-# 다음날 같은 위치를 $YESTERDAY_DIR/state/<module>/<key> 로 비교할 수 있습니다.
+# 다음날 같은 위치를 $YESTERDAY_DIR/state/<module>/<key> 로 비교할 수 있다.
 # 예) ss -tnlp 결과를 정규화→정렬해서 state_save, 다음날 comm 으로 신규 LISTEN 검출.
 
 # 오늘 상태 파일 경로
@@ -521,7 +521,7 @@ acquire_lock() {
         return 0
     fi
     if ! flock -n 9; then
-        printf 'secchk: 다른 인스턴스가 실행 중입니다 (%s). 종료.\n' "$lockfile" >&2
+        printf 'secchk: 다른 인스턴스 실행 중 (%s) — 종료\n' "$lockfile" >&2
         exit 30
     fi
     log "lock 획득: $lockfile"
@@ -593,7 +593,7 @@ setup_output() {
     log "설정: $SECCHK_CONFIG_USED"
 }
 
-# 비교 대상(어제) 디렉토리 결정 + baseline 모드 판정
+# 비교 대상(어제) 디렉토리 결정 + WARMUP_PERIOD 모드 판정
 determine_yesterday() {
     local dirs=()
     while IFS= read -r d; do
@@ -1539,7 +1539,8 @@ mod_16_ssh_auth() {
 # 왜: WAF 는 HTTP 요청만 보는데, 웹쉘은 이미 업로드된 후엔 그 트래픽이 정상 처리로
 #     보인다. 디스크에 남은 파일을 정기적으로 스캔하는 게 유일한 사후 탐지 수단.
 #
-# baseline diff 가 아닌 단순 패턴 매칭이므로 매칭 자체가 HIGH (diff_based=0).
+# 어제 vs 오늘 diff 가 아닌 단순 패턴 매칭이므로 매칭 자체가 HIGH (diff_based=0,
+# WARMUP_PERIOD 와 무관하게 첫날부터 격하 없이 보고).
 # 정상 코드에서 우연히 매칭되면 운영자가 webshell_regex.txt 의 해당 줄을 좁히거나,
 # secchk.conf 의 WEB_ROOTS 에서 그 영역을 제외한다.
 
@@ -2517,7 +2518,7 @@ h1{margin:0 0 16px}
 .banner.alert{background:#c0392b}
 .banner.warn{background:#e67e22}
 .banner.clean{background:#27ae60}
-.banner.baseline{background:#e67e22;font-weight:400}
+.banner.warmup{background:#e67e22;font-weight:400}
 .meta{background:white;padding:16px 20px;border-radius:6px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
 .meta dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}
 .meta dt{color:#666;font-weight:600}
@@ -2564,7 +2565,7 @@ HEAD
         printf '<div class="banner clean">✓ CLEAN — HIGH/MEDIUM 발견 없음.</div>\n' >> "$html"
     fi
     if [ "$WARMUP_MODE" -eq 1 ]; then
-        printf '<div class="banner baseline">WARMUP_PERIOD: 가동 초기 안정화 기간 (과거 결과 8개 미만). 콜드 영역이 7일 한 바퀴 돌고 1일 마진까지 끝나야 모든 diff 가 의미 있는 비교가 되므로 그 전에는 diff 기반 HIGH/MEDIUM 을 INFO 로 격하합니다 (8일 후 자동 정상화).</div>\n' >> "$html"
+        printf '<div class="banner warmup">WARMUP_PERIOD — 가동 초기 안정화 기간 (과거 결과 8개 미만). 콜드 영역이 7일 한 바퀴 + 1일 마진까지 끝나기 전까지 diff 기반 HIGH/MEDIUM 은 INFO 로 격하. 8일 후 자동 정상화.</div>\n' >> "$html"
     fi
 
     # 메타
@@ -2764,9 +2765,10 @@ _report_retention() {
 # ---------------------------------------------------------------------------
 # 99_footer.sh — main() 진입점 / 종료 코드
 # ---------------------------------------------------------------------------
-# 이 파일은 build.sh 가 가장 마지막에 합칩니다.
-# run_checks(점검 디스패치)와 finalize_report(리포트)는 이후 Step 에서 별도
-# 모듈로 정의됩니다. 여기서는 "정의돼 있으면 호출"하여 골격 단계에서도 동작합니다.
+# build.sh 가 가장 마지막에 합치는 모듈. main() 흐름:
+#   reexec(nice/ionice) → parse_args → load_config → detect_os →
+#   acquire_lock → setup_output → determine_yesterday →
+#   run_checks(89_dispatch) → finalize_report(90_report) → 종료 코드
 
 _print_console_summary() {
     local status='CLEAN'
@@ -2807,16 +2809,20 @@ main() {
     setup_output
     determine_yesterday
 
+    # run_checks / finalize_report 는 각각 89_dispatch.sh / 90_report.sh 에서 정의.
+    # 빌드 산출물에 누락된 경우(비정상) ERROR 로 기록하고 가능한 만큼 진행.
     if declare -F run_checks >/dev/null 2>&1; then
         run_checks
     else
-        log "run_checks 미정의 — 골격 단계(점검 모듈 미탑재)"
+        _log_line "ERROR" "run_checks 미정의 — 빌드 산출물 누락 가능성 (src/89_dispatch.sh 확인)"
+        COUNT_ERROR=$((COUNT_ERROR + 1))
     fi
 
     if declare -F finalize_report >/dev/null 2>&1; then
         finalize_report
     else
-        log "finalize_report 미정의 — 골격 단계(리포트 미탑재)"
+        _log_line "ERROR" "finalize_report 미정의 — 빌드 산출물 누락 가능성 (src/90_report.sh 확인)"
+        COUNT_ERROR=$((COUNT_ERROR + 1))
     fi
 
     _print_console_summary

@@ -135,7 +135,7 @@ run_module() {
 # 모듈별 상태 저장 / 비교 (어제 vs 오늘 diff)
 # ---------------------------------------------------------------------------
 # 모듈이 자기 점검 결과(정렬된 텍스트)를 $TODAY_DIR/state/<module>/<key> 에 저장하면,
-# 다음날 같은 위치를 $YESTERDAY_DIR/state/<module>/<key> 로 비교할 수 있습니다.
+# 다음날 같은 위치를 $YESTERDAY_DIR/state/<module>/<key> 로 비교할 수 있다.
 # 예) ss -tnlp 결과를 정규화→정렬해서 state_save, 다음날 comm 으로 신규 LISTEN 검출.
 
 # 오늘 상태 파일 경로

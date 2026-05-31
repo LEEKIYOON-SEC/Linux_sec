@@ -2,9 +2,10 @@
 # ---------------------------------------------------------------------------
 # 99_footer.sh — main() 진입점 / 종료 코드
 # ---------------------------------------------------------------------------
-# 이 파일은 build.sh 가 가장 마지막에 합칩니다.
-# run_checks(점검 디스패치)와 finalize_report(리포트)는 이후 Step 에서 별도
-# 모듈로 정의됩니다. 여기서는 "정의돼 있으면 호출"하여 골격 단계에서도 동작합니다.
+# build.sh 가 가장 마지막에 합치는 모듈. main() 흐름:
+#   reexec(nice/ionice) → parse_args → load_config → detect_os →
+#   acquire_lock → setup_output → determine_yesterday →
+#   run_checks(89_dispatch) → finalize_report(90_report) → 종료 코드
 
 _print_console_summary() {
     local status='CLEAN'
@@ -45,16 +46,20 @@ main() {
     setup_output
     determine_yesterday
 
+    # run_checks / finalize_report 는 각각 89_dispatch.sh / 90_report.sh 에서 정의.
+    # 빌드 산출물에 누락된 경우(비정상) ERROR 로 기록하고 가능한 만큼 진행.
     if declare -F run_checks >/dev/null 2>&1; then
         run_checks
     else
-        log "run_checks 미정의 — 골격 단계(점검 모듈 미탑재)"
+        _log_line "ERROR" "run_checks 미정의 — 빌드 산출물 누락 가능성 (src/89_dispatch.sh 확인)"
+        COUNT_ERROR=$((COUNT_ERROR + 1))
     fi
 
     if declare -F finalize_report >/dev/null 2>&1; then
         finalize_report
     else
-        log "finalize_report 미정의 — 골격 단계(리포트 미탑재)"
+        _log_line "ERROR" "finalize_report 미정의 — 빌드 산출물 누락 가능성 (src/90_report.sh 확인)"
+        COUNT_ERROR=$((COUNT_ERROR + 1))
     fi
 
     _print_console_summary

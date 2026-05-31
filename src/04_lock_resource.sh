@@ -49,7 +49,7 @@ acquire_lock() {
         return 0
     fi
     if ! flock -n 9; then
-        printf 'secchk: 다른 인스턴스가 실행 중입니다 (%s). 종료.\n' "$lockfile" >&2
+        printf 'secchk: 다른 인스턴스 실행 중 (%s) — 종료\n' "$lockfile" >&2
         exit 30
     fi
     log "lock 획득: $lockfile"
@@ -121,7 +121,7 @@ setup_output() {
     log "설정: $SECCHK_CONFIG_USED"
 }
 
-# 비교 대상(어제) 디렉토리 결정 + baseline 모드 판정
+# 비교 대상(어제) 디렉토리 결정 + WARMUP_PERIOD 모드 판정
 determine_yesterday() {
     local dirs=()
     while IFS= read -r d; do
