@@ -272,8 +272,8 @@ ROTATE_Sun="/var/spool /var/lib"
 WEB_ROOTS="/var/www /usr/share/nginx/html /opt/tomcat/webapps"
 
 # ─── 신뢰 외부 DNS (사설망 외 IP 중 정상으로 인정할 것만 등록) ─────
-# 사내 DNS는 보통 사설망 IP라 자동 신뢰됨. 외부 공용 DNS(8.8.8.8 등)를 정상으로
-# 운영에 쓰는 환경에서만 그 IP를 등록한다. 그 외 환경에서는 빈 값.
+# 사내 DNS는 보통 사설망 IP라 자동 신뢰됩니다. 외부 공용 DNS(8.8.8.8 등)를
+# 정상 운영에 쓰는 환경에서만 그 IP를 등록하세요. 그 외 환경에서는 빈 값.
 TRUSTED_DNS=""
 
 # ─── 결과 보관 / 자원 ───────────────────────────────────
@@ -565,9 +565,11 @@ LKM(Loadable Kernel Module) 루트킷은 커널 영역에서 동작하므로 사
 ### 20_system_integrity — 패키지 무결성
 
 **무엇을 보나요?**
-- RHEL: `rpm -Va`로 모든 패키지 파일이 정상 해시와 일치하는지
-- Ubuntu: `debsums -ce`로 동일 검사
-- 핵심 패키지(`coreutils`, `util-linux`, `openssh-*`, `pam` 등) 별도 풀 검증 → HIGH
+- RHEL: `rpm -Va`로 설치된 모든 패키지 파일이 정상 해시와 일치하는지 (config 등 예상 변경은 필터링)
+- Ubuntu: `debsums -ce`로 변경된 **설정 파일**을 점검
+- 두 계열 공통으로, 시스템 핵심 패키지(`coreutils`, `util-linux`, `openssh-*`, `pam` 등)는 **모든 파일을 별도 풀 검증** → 일반 바이너리(`ls`, `ps`, `ss` 등) 변조도 여기서 HIGH로 탐지
+
+> 참고: RHEL의 `rpm -Va`는 전 패키지의 모든 파일을 보지만, Ubuntu의 `debsums -ce`는 설정 파일 위주입니다. 그래서 Ubuntu에서 핵심 패키지 밖의 일반 바이너리 변조 탐지는 핵심 패키지 풀 검증 목록에 의존합니다. 보호하려는 명령이 더 있으면 코드의 `core_pkgs` 목록에 추가하세요.
 
 **왜 봐야 하나요?**
 공격자가 `ls`, `ps`, `ss`, `sshd` 같은 시스템 명령어를 **trojan 버전으로 교체**하면 운영자가 보는 모든 결과가 거짓이 됩니다. 다행히 배포판 패키지에는 메이커가 서명한 정상 해시가 들어 있어, 이를 기준으로 변조 여부를 신뢰성 있게 확인할 수 있습니다. 이미 침해된 서버에서도 동작하는 강력한 검증법입니다.
@@ -691,10 +693,10 @@ ClamAV와 다른 시그니처 DB를 사용하므로 보조 검증 레이어가 �
 | 신규 SSH authorized_key | 16 (new_ssh_key) |
 | 더미 웹쉘 (eval base64_decode) | 17 (webshell_pattern_match) |
 | 로그 파일 0바이트 + 사이즈 감소 | 18 (log_zero_size × 2 + log_size_decreased) |
-| `/bin/ls` 변조 | 20 (debsums_mismatch + core_pkg_mismatch) |
+| `/bin/ls` 변조 | 20 (core_pkg_mismatch — 핵심 패키지 변조 HIGH) |
 | `/etc/hosts` 외부 매핑 + 가짜 CA | 21 (hosts_external_mapping + new_ca_cert) |
 
-→ 총 HIGH 18 + MEDIUM 6 = STATUS:ALERT. **12종 침해 100% 탐지**.
+→ 12종 침해가 9개 모듈에서 **HIGH 18건**으로 탐지되어 STATUS:ALERT. (MEDIUM 건수는 서버 상태에 따라 달라집니다 — 위 캡처 환경에서는 5~6건.) **12종 모두 탐지**.
 
 ---
 
