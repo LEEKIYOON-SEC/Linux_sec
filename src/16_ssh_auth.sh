@@ -98,5 +98,31 @@ mod_16_ssh_auth() {
         fi
     fi
 
+    # ----- (5) /etc/ssh/sshd_config.d/* 변경 (include 디렉토리) -----
+    # sshd -T 가 effective 설정을 보지만, 파일 단위 변경 시각/해시도 별도로 추적.
+    if [ -d /etc/ssh/sshd_config.d ]; then
+        find /etc/ssh/sshd_config.d -type f -print0 2>/dev/null \
+            | xargs -0 -r sha256sum 2>/dev/null | sort | state_save "$M" "sshd_config_d"
+        yp="$(state_yesterday_path "$M" "sshd_config_d")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "sshd_config_d")"
+            cmp -s "$yp" "$tp" || \
+                log_finding "$M" "sshd_config_d_changed" "HIGH" \
+                    "/etc/ssh/sshd_config.d/* 변경 — SSH 설정 조각 변조 의심" "" 1
+        fi
+    fi
+
+    # ----- (6) 사용자 ~/.ssh/config 의 ProxyCommand / LocalCommand -----
+    # 사용자 SSH 클라이언트 설정에 명령 실행 지시가 있으면 트래픽 우회/실행 백도어.
+    local uhome
+    while IFS=: read -r user _ _ _ _ uhome _; do
+        [ -f "$uhome/.ssh/config" ] || continue
+        if grep -qiE '^[[:space:]]*(ProxyCommand|LocalCommand|PermitLocalCommand)' "$uhome/.ssh/config" 2>/dev/null; then
+            log_finding "$M" "ssh_client_command" "MEDIUM" \
+                "사용자 ~/.ssh/config 에 명령 실행 지시(ProxyCommand 등) — 우회/실행 백도어 가능" \
+                "$user: $(grep -iE 'ProxyCommand|LocalCommand' "$uhome/.ssh/config" 2>/dev/null | head -1)" 0
+        fi
+    done < /etc/passwd
+
     return 0
 }

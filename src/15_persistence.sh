@@ -32,6 +32,22 @@ mod_15_persistence() {
                 "$diff_text" 1
         fi
     fi
+
+    # @reboot cron 항목 강조 — 부팅 시 1회 실행되는 백도어의 대표 패턴
+    local reboot_cron
+    reboot_cron="$(
+        {
+            grep -hE '^[^#]*@reboot' /etc/crontab /etc/cron.d/* 2>/dev/null
+            for cu in /var/spool/cron/crontabs/* /var/spool/cron/*; do
+                [ -f "$cu" ] && grep -hE '^[^#]*@reboot' "$cu" 2>/dev/null
+            done
+        } | head -10
+    )"
+    if [ -n "$reboot_cron" ]; then
+        log_finding "$M" "reboot_cron" "MEDIUM" \
+            "@reboot cron 항목 — 부팅 시 자동 실행. 정상 등록인지 확인" \
+            "$(printf '%s' "$reboot_cron" | tr '\n' '|')" 0
+    fi
     throttle_sleep
 
     # ----- (2) systemd timer 어제 비교 -----
@@ -48,6 +64,29 @@ mod_15_persistence() {
                     log_finding "$M" "new_timer" "MEDIUM" \
                         "신규 systemd timer — 주기적 자동 실행 의심" "$timer" 1
             done < <(comm -13 "$yp" "$tp")
+        fi
+
+        # systemd .service 유닛 파일 신규 — /etc/systemd/system 의 등록 변경
+        find /etc/systemd/system -maxdepth 2 -name '*.service' -type f 2>/dev/null \
+            | sort -u | state_save "$M" "systemd_services"
+        yp="$(state_yesterday_path "$M" "systemd_services")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "systemd_services")"
+            local svc
+            while IFS= read -r svc; do
+                [ -n "$svc" ] && \
+                    log_finding "$M" "new_systemd_service" "HIGH" \
+                        "신규 systemd 서비스 유닛 — 지속성 백도어 의심" "$svc" 1
+            done < <(comm -13 "$yp" "$tp")
+        fi
+
+        # 실패한 서비스 — 침해로 죽었거나 잘못 등록된 의심 서비스
+        local failed_svc
+        failed_svc="$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | head -10)"
+        if [ -n "$failed_svc" ]; then
+            log_finding "$M" "failed_services" "INFO" \
+                "실패 상태 서비스 존재 — 침해로 인한 비정상 종료인지 확인" \
+                "$(printf '%s' "$failed_svc" | tr '\n' ' ')" 0
         fi
     fi
 
@@ -100,6 +139,21 @@ mod_15_persistence() {
                 "systemd 서비스에 LD_PRELOAD 환경변수" "$svc_ldp" 0
         fi
     fi
+    # (a-2) 실행 중 프로세스의 environ 에 LD_PRELOAD / LD_LIBRARY_PATH 주입
+    # 파일이 아니라 살아있는 프로세스 메모리의 환경변수를 직접 본다.
+    local envpid envhit=0
+    for d in /proc/[0-9]*; do
+        [ -r "$d/environ" ] || continue
+        if grep -qaE 'LD_PRELOAD=|LD_LIBRARY_PATH=/tmp|LD_LIBRARY_PATH=/dev/shm' "$d/environ" 2>/dev/null; then
+            envpid="${d##*/}"
+            envhit=$((envhit + 1))
+            [ "$envhit" -le 10 ] && \
+                log_finding "$M" "ld_preload_process_env" "HIGH" \
+                    "실행 중 프로세스 환경변수에 LD_PRELOAD/의심 LD_LIBRARY_PATH" \
+                    "pid=$envpid $(tr '\0' ' ' < "$d/environ" 2>/dev/null | grep -oE 'LD_[A-Z_]+=[^ ]*' | head -2 | tr '\n' ' ')" 0
+        fi
+    done
+
     # (b) 시스템 환경 파일들에 LD_PRELOAD 문자열
     local sys_targets='/etc/environment /etc/profile /etc/bashrc /etc/bash.bashrc'
     # shellcheck disable=SC2086

@@ -134,5 +134,30 @@ mod_14_file_anomaly() {
         log_finding "$M" "tmp_suspicious_more" "INFO" \
             "임시 디렉토리 의심 파일 외 $((susp_cnt - 20))건 (상위 20건만 별도 보고)" "" 0
 
+    # ----- (4) File Capabilities 어제 diff -----
+    # SUID 대신 capability(cap_setuid 등)로 권한을 부여한 백도어를 잡는다.
+    # getcap 은 libcap2-bin 패키지. 없으면 INFO skip (새 패키지 강제 안 함).
+    if have_cmd getcap; then
+        local cap_today cap_yp cap_tp capline
+        cap_today="$(mk_tmp)" || return 0
+        # 핫스팟 중 바이너리가 있는 곳 + 콜드의 시스템 bin 경로를 함께 본다.
+        # -r 재귀, 권한 없는 경로는 조용히 skip.
+        getcap -r /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin /opt 2>/dev/null \
+            | sort -u > "$cap_today"
+        state_save "$M" "file_caps" < "$cap_today"
+        cap_yp="$(state_yesterday_path "$M" "file_caps")"
+        if [ -n "$cap_yp" ]; then
+            cap_tp="$(state_path "$M" "file_caps")"
+            while IFS= read -r capline; do
+                [ -n "$capline" ] && \
+                    log_finding "$M" "new_file_capability" "HIGH" \
+                        "신규 file capability — SUID 우회 권한 상승 채널 의심" "$capline" 1
+            done < <(comm -13 "$cap_yp" "$cap_tp")
+        fi
+    else
+        log_finding "$M" "no_getcap" "INFO" \
+            "getcap 미설치(libcap2-bin) — file capability 점검 skip" "" 0
+    fi
+
     return 0
 }

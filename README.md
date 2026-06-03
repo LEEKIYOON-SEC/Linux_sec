@@ -365,7 +365,7 @@ clamscan --version
 각 모듈은 **무엇을 보는지 / 왜 보는지 / 탐지되면 어떻게**의 3분 구조로 설명합니다.
 
 > 16개 모듈이 정의되어 있지만, 환경 조건이 안 맞으면 일부는 자동으로 건너뜁니다.
-> 예) 메일 데몬(postfix/sendmail)이 없으면 22 자동 skip, docker/podman 둘 다 없으면 23 자동 skip, ClamAV 미설치이거나 `--no-clamav`이면 24 skip, rkhunter는 `--with-rkhunter` 옵션 사용 시에만 동작. `SUMMARY.txt`/`result.json`의 INFO 항목으로 skip 사유가 기록됩니다.
+> 예) 메일 데몬(postfix/sendmail)이 없으면 22 자동 skip, docker/podman 둘 다 없으면 23 자동 skip, ClamAV 미설치이거나 `--no-clamav`이면 24 skip, rkhunter는 `--with-rkhunter` 옵션 사용 시에만 동작, `getcap`(libcap2-bin) 미설치 시 14의 file capability 검사만 skip. `SUMMARY.txt`/`result.json`의 INFO 항목으로 skip 사유가 기록됩니다.
 
 ### 10_account — 계정 무결성
 
@@ -395,6 +395,7 @@ clamscan --version
 - `last`로 새벽 2~5시 root 성공 로그인이 있는지 (외부 IP는 강조)
 - `lastb`로 동일 IP에서 임계(기본 20회) 이상 실패가 있는지
 - 같은 사용자 계정이 1시간 안에 3개 이상 서로 다른 호스트에서 로그인했는지
+- `auth.log`/`secure` 라인 분석: sudo/su 인증 실패, useradd/usermod/passwd 같은 계정 변경 이벤트, sshd 인증 실패 폭주 (사이즈만 보는 18번과 달리 "무슨 일이 있었나"를 라인 내용에서 확인)
 
 **왜 봐야 하나요?**
 정상 운영자는 업무 시간에 익숙한 사내 IP에서 접속합니다. 새벽 무인 시간대의 root 접속이나, 짧은 시간에 여러 IP에서 같은 계정 로그인이 성공하는 건 자격증명 탈취의 신호일 수 있습니다.
@@ -456,9 +457,10 @@ LKM 루트킷은 `ps` 명령의 결과에서 자기 PID를 숨깁니다. 하지�
 - 어제 없던 world-writable 파일 (누구나 수정 가능한 파일)
 - 24시간 안에 변경된 파일 목록
 - `/tmp`, `/dev/shm`, `/var/tmp`의 숨김 파일 또는 실행권한 파일 (7일 내 생성)
+- 어제 없던 **file capability** (`getcap`로 검사 — `cap_setuid` 등). 단 `getcap` 미설치(libcap2-bin) 시 자동 skip
 
 **왜 봐야 하나요?**
-SUID 파일은 일반 사용자가 실행해도 관리자 권한으로 동작합니다. 공격자가 자기 백도어에 SUID를 붙이면 일반 사용자 권한만 가지고도 관리자 권한을 얻을 수 있습니다. `/tmp`나 `/dev/shm`의 숨김 실행 파일(`.x`, `.sshd` 같은)은 거의 항상 침해 흔적입니다.
+SUID 파일은 일반 사용자가 실행해도 관리자 권한으로 동작합니다. 공격자가 자기 백도어에 SUID를 붙이면 일반 사용자 권한만 가지고도 관리자 권한을 얻을 수 있습니다. `/tmp`나 `/dev/shm`의 숨김 실행 파일(`.x`, `.sshd` 같은)은 거의 항상 침해 흔적입니다. 요즘 공격자는 SUID 대신 file capability로 권한을 부여해 탐지를 피하기도 하므로 둘 다 봅니다.
 
 **탐지되면 어떻게 하나요?**
 1. 신규 SUID 파일이면: `stat`으로 소유자/생성 시각 확인
@@ -472,10 +474,13 @@ SUID 파일은 일반 사용자가 실행해도 관리자 권한으로 동작합
 
 **무엇을 보나요?**
 - `cron` 관련 위치 전체(`/etc/crontab`, `/etc/cron.{hourly,daily,weekly,monthly}/*`, `/var/spool/cron/*`)가 어제와 다른지
+- **`@reboot` cron 항목** (부팅 시 1회 실행되는 백도어의 대표 패턴)
 - 신규 systemd timer가 등록됐는지
+- **신규 systemd `.service` 유닛 파일** (`/etc/systemd/system`)
+- **실패 상태 서비스** (`systemctl --failed` — 침해로 죽었거나 잘못 등록된 의심 서비스)
 - `/etc/rc.local`, `/etc/init.d/*`에 변경이 있는지
 - **`/etc/ld.so.preload` 파일의 존재 자체** (대부분 시스템에서 없는 게 정상)
-- `LD_PRELOAD` 환경변수가 systemd 서비스 / 시스템 환경 파일 / 사용자 셸 설정에 있는지
+- `LD_PRELOAD` 환경변수가 systemd 서비스 / 시스템 환경 파일 / 사용자 셸 설정 / **실행 중 프로세스의 environ**에 있는지
 - `/etc/profile`, `/etc/bashrc` 등에 의심 명령(`curl`, `wget`, `nc`, `bash -i`, `/dev/tcp/`)이 들어 있는지
 - `/etc/skel/`에 최근 30일 내 변경이 있는지 (새 계정마다 자동 감염)
 
@@ -495,8 +500,10 @@ SUID 파일은 일반 사용자가 실행해도 관리자 권한으로 동작합
 **무엇을 보나요?**
 - 모든 사용자의 `~/.ssh/authorized_keys`가 어제와 다른지 (신규 키 1줄이라도 HIGH)
 - `sshd -T`로 추출한 effective 설정(`PermitRootLogin`, `PasswordAuthentication`, `AllowUsers`, `Port` 등)이 어제와 다른지
+- `/etc/ssh/sshd_config.d/*` (include 디렉토리)가 어제와 다른지
 - `/etc/pam.d/` 안에 최근 24시간 내 변경된 파일이 있는지
 - `/etc/securetty`가 변경됐는지
+- 사용자 `~/.ssh/config`에 `ProxyCommand`/`LocalCommand` 같은 명령 실행 지시가 있는지 (트래픽 우회·실행 백도어)
 
 **왜 봐야 하나요?**
 SSH 키 추가는 **공격자가 가장 흔하게 쓰는 재접속 백도어**입니다. 패스워드 변경은 운영자에게 즉시 들키지만, `authorized_keys`에 키 한 줄 추가는 거의 안 들킵니다. PAM 모듈 변조는 패스워드를 가로채거나 특정 입력으로 인증을 우회하게 만듭니다.
@@ -576,6 +583,8 @@ LKM(Loadable Kernel Module) 루트킷은 커널 영역에서 동작하므로 사
 
 운영자가 보호 대상을 더 추가하고 싶으면 `secchk.conf`의 `CORE_PKGS_RHEL` / `CORE_PKGS_DEBIAN`에 패키지명을 추가하면 됩니다. 예) `curl`, `sudo`, `audit` 등.
 
+추가로 **패키지 설치/업그레이드 이력**(`/var/log/dpkg.log` 또는 `/var/log/dnf.rpm.log`·`/var/log/yum.log`)을 어제와 비교해, 어제 없던 신규 설치 패키지를 MEDIUM으로 보고합니다. 공격자가 백도어 패키지를 설치한 흔적을 잡습니다.
+
 **왜 봐야 하나요?**
 공격자가 `ls`, `ps`, `ss`, `sshd` 같은 시스템 명령어를 **trojan 버전으로 교체**하면 운영자가 보는 모든 결과가 거짓이 됩니다. 다행히 배포판 패키지에는 메이커가 서명한 정상 해시가 들어 있어, 이를 기준으로 변조 여부를 신뢰성 있게 확인할 수 있습니다. 이미 침해된 서버에서도 동작하는 강력한 검증법입니다.
 
@@ -587,7 +596,7 @@ LKM(Loadable Kernel Module) 루트킷은 커널 영역에서 동작하므로 사
 
 ---
 
-### 21_network_config — 네트워크 설정 변조
+### 21_network_config — 네트워크 / 시스템 설정 변조
 
 **무엇을 보나요?**
 - `/etc/resolv.conf`가 변경됐는지 + `TRUSTED_DNS`에 없는 외부 nameserver가 있는지
@@ -595,6 +604,8 @@ LKM(Loadable Kernel Module) 루트킷은 커널 영역에서 동작하므로 사
 - `/etc/nsswitch.conf` 변경
 - yum repo / apt sources 파일 변경
 - 신뢰 CA 저장소(`/etc/pki/ca-trust/source/anchors`, `/usr/local/share/ca-certificates`, `/etc/ssl/certs`)에 신규 파일
+- **sysctl 보안 값**: `net.ipv4.ip_forward=1`(트래픽 우회), `kernel.randomize_va_space=0`(ASLR 무력화), `fs.suid_dumpable`(메모리 유출 경로) + `/etc/sysctl.conf`·`/etc/sysctl.d/*` 변경
+- **`/etc/fstab` 변경** (`nosuid`/`noexec` 마운트 옵션 제거 등)
 
 **왜 봐야 하나요?**
 공격자가 DNS를 자기 서버로 돌리면 `apt update`나 `yum update`가 악성 패키지를 받게 만들 수 있습니다. `/etc/hosts`에 가짜 매핑을 추가하면 운영자가 신뢰하는 도메인이 공격자 서버를 가리키게 됩니다. 가짜 CA를 신뢰 저장소에 주입하면 SSL 검증을 우회하는 MITM 인프라가 완성됩니다.

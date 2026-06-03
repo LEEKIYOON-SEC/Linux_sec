@@ -859,6 +859,51 @@ mod_11_login_history() {
         )
     fi
 
+    # (4) auth.log / secure 라인 분석 — sudo/su 시도, 인증 실패, 계정 변경 이벤트
+    # 사이즈만 보는 18_log_tamper 와 달리 "무슨 일이 있었나" 를 라인 내용에서 본다.
+    # 24시간 내 항목만 집계하기 어려우므로(로그 포맷이 연도 없음) 최근 N줄 기준.
+    local authlog=''
+    case "$OS_FAMILY" in
+        rhel)   [ -r /var/log/secure ]   && authlog='/var/log/secure' ;;
+        debian) [ -r /var/log/auth.log ] && authlog='/var/log/auth.log' ;;
+        *)      [ -r /var/log/auth.log ] && authlog='/var/log/auth.log'
+                [ -z "$authlog" ] && [ -r /var/log/secure ] && authlog='/var/log/secure' ;;
+    esac
+
+    if [ -n "$authlog" ]; then
+        local tail_lines cnt
+        tail_lines="$(mk_tmp)" || return 0
+        tail -n 2000 "$authlog" 2>/dev/null > "$tail_lines"
+
+        # sudo 인증 실패 (sudo: ... authentication failure / NOPASSWD 아닌 실패)
+        cnt="$(grep -cE 'sudo:.*authentication failure|sudo:.*incorrect password' "$tail_lines" 2>/dev/null || echo 0)"
+        [ "$cnt" -gt 0 ] && \
+            log_finding "$M" "sudo_auth_failure" "MEDIUM" \
+                "sudo 인증 실패 ${cnt}건 (최근 로그) — 권한 상승 시도 의심" \
+                "$(grep -E 'sudo:.*authentication failure|sudo:.*incorrect password' "$tail_lines" 2>/dev/null | tail -3 | tr '\n' '|')" 0
+
+        # su 실패
+        cnt="$(grep -cE 'su(\[[0-9]+\])?:.*(FAILED|authentication failure)' "$tail_lines" 2>/dev/null || echo 0)"
+        [ "$cnt" -gt 0 ] && \
+            log_finding "$M" "su_failure" "MEDIUM" \
+                "su 실패 ${cnt}건 (최근 로그)" \
+                "$(grep -E 'su(\[[0-9]+\])?:.*(FAILED|authentication failure)' "$tail_lines" 2>/dev/null | tail -3 | tr '\n' '|')" 0
+
+        # 계정 변경 이벤트 (useradd/usermod/userdel/passwd/groupadd)
+        cnt="$(grep -cE 'useradd\[|usermod\[|userdel\[|groupadd\[|passwd\[.*password changed' "$tail_lines" 2>/dev/null || echo 0)"
+        [ "$cnt" -gt 0 ] && \
+            log_finding "$M" "account_change_event" "INFO" \
+                "계정/그룹 변경 이벤트 ${cnt}건 (최근 로그) — 10_account 결과와 교차 확인" \
+                "$(grep -E 'useradd\[|usermod\[|userdel\[|groupadd\[' "$tail_lines" 2>/dev/null | tail -3 | tr '\n' '|')" 0
+
+        # SSH 인증 실패 폭주 (lastb 와 별개로 로그 기반 보강)
+        cnt="$(grep -cE 'sshd\[[0-9]+\]:.*(Failed password|Invalid user|authentication failure)' "$tail_lines" 2>/dev/null || echo 0)"
+        if [ "$cnt" -ge "$FAILED_LOGIN_THRESHOLD" ]; then
+            log_finding "$M" "sshd_auth_failure_burst" "MEDIUM" \
+                "sshd 인증 실패 ${cnt}건 (최근 로그, >= ${FAILED_LOGIN_THRESHOLD}) — 무차별 공격 의심" "" 0
+        fi
+    fi
+
     return 0
 }
 
@@ -1263,6 +1308,31 @@ mod_14_file_anomaly() {
         log_finding "$M" "tmp_suspicious_more" "INFO" \
             "임시 디렉토리 의심 파일 외 $((susp_cnt - 20))건 (상위 20건만 별도 보고)" "" 0
 
+    # ----- (4) File Capabilities 어제 diff -----
+    # SUID 대신 capability(cap_setuid 등)로 권한을 부여한 백도어를 잡는다.
+    # getcap 은 libcap2-bin 패키지. 없으면 INFO skip (새 패키지 강제 안 함).
+    if have_cmd getcap; then
+        local cap_today cap_yp cap_tp capline
+        cap_today="$(mk_tmp)" || return 0
+        # 핫스팟 중 바이너리가 있는 곳 + 콜드의 시스템 bin 경로를 함께 본다.
+        # -r 재귀, 권한 없는 경로는 조용히 skip.
+        getcap -r /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin /opt 2>/dev/null \
+            | sort -u > "$cap_today"
+        state_save "$M" "file_caps" < "$cap_today"
+        cap_yp="$(state_yesterday_path "$M" "file_caps")"
+        if [ -n "$cap_yp" ]; then
+            cap_tp="$(state_path "$M" "file_caps")"
+            while IFS= read -r capline; do
+                [ -n "$capline" ] && \
+                    log_finding "$M" "new_file_capability" "HIGH" \
+                        "신규 file capability — SUID 우회 권한 상승 채널 의심" "$capline" 1
+            done < <(comm -13 "$cap_yp" "$cap_tp")
+        fi
+    else
+        log_finding "$M" "no_getcap" "INFO" \
+            "getcap 미설치(libcap2-bin) — file capability 점검 skip" "" 0
+    fi
+
     return 0
 }
 
@@ -1299,6 +1369,22 @@ mod_15_persistence() {
                 "$diff_text" 1
         fi
     fi
+
+    # @reboot cron 항목 강조 — 부팅 시 1회 실행되는 백도어의 대표 패턴
+    local reboot_cron
+    reboot_cron="$(
+        {
+            grep -hE '^[^#]*@reboot' /etc/crontab /etc/cron.d/* 2>/dev/null
+            for cu in /var/spool/cron/crontabs/* /var/spool/cron/*; do
+                [ -f "$cu" ] && grep -hE '^[^#]*@reboot' "$cu" 2>/dev/null
+            done
+        } | head -10
+    )"
+    if [ -n "$reboot_cron" ]; then
+        log_finding "$M" "reboot_cron" "MEDIUM" \
+            "@reboot cron 항목 — 부팅 시 자동 실행. 정상 등록인지 확인" \
+            "$(printf '%s' "$reboot_cron" | tr '\n' '|')" 0
+    fi
     throttle_sleep
 
     # ----- (2) systemd timer 어제 비교 -----
@@ -1315,6 +1401,29 @@ mod_15_persistence() {
                     log_finding "$M" "new_timer" "MEDIUM" \
                         "신규 systemd timer — 주기적 자동 실행 의심" "$timer" 1
             done < <(comm -13 "$yp" "$tp")
+        fi
+
+        # systemd .service 유닛 파일 신규 — /etc/systemd/system 의 등록 변경
+        find /etc/systemd/system -maxdepth 2 -name '*.service' -type f 2>/dev/null \
+            | sort -u | state_save "$M" "systemd_services"
+        yp="$(state_yesterday_path "$M" "systemd_services")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "systemd_services")"
+            local svc
+            while IFS= read -r svc; do
+                [ -n "$svc" ] && \
+                    log_finding "$M" "new_systemd_service" "HIGH" \
+                        "신규 systemd 서비스 유닛 — 지속성 백도어 의심" "$svc" 1
+            done < <(comm -13 "$yp" "$tp")
+        fi
+
+        # 실패한 서비스 — 침해로 죽었거나 잘못 등록된 의심 서비스
+        local failed_svc
+        failed_svc="$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | head -10)"
+        if [ -n "$failed_svc" ]; then
+            log_finding "$M" "failed_services" "INFO" \
+                "실패 상태 서비스 존재 — 침해로 인한 비정상 종료인지 확인" \
+                "$(printf '%s' "$failed_svc" | tr '\n' ' ')" 0
         fi
     fi
 
@@ -1367,6 +1476,21 @@ mod_15_persistence() {
                 "systemd 서비스에 LD_PRELOAD 환경변수" "$svc_ldp" 0
         fi
     fi
+    # (a-2) 실행 중 프로세스의 environ 에 LD_PRELOAD / LD_LIBRARY_PATH 주입
+    # 파일이 아니라 살아있는 프로세스 메모리의 환경변수를 직접 본다.
+    local envpid envhit=0
+    for d in /proc/[0-9]*; do
+        [ -r "$d/environ" ] || continue
+        if grep -qaE 'LD_PRELOAD=|LD_LIBRARY_PATH=/tmp|LD_LIBRARY_PATH=/dev/shm' "$d/environ" 2>/dev/null; then
+            envpid="${d##*/}"
+            envhit=$((envhit + 1))
+            [ "$envhit" -le 10 ] && \
+                log_finding "$M" "ld_preload_process_env" "HIGH" \
+                    "실행 중 프로세스 환경변수에 LD_PRELOAD/의심 LD_LIBRARY_PATH" \
+                    "pid=$envpid $(tr '\0' ' ' < "$d/environ" 2>/dev/null | grep -oE 'LD_[A-Z_]+=[^ ]*' | head -2 | tr '\n' ' ')" 0
+        fi
+    done
+
     # (b) 시스템 환경 파일들에 LD_PRELOAD 문자열
     local sys_targets='/etc/environment /etc/profile /etc/bashrc /etc/bash.bashrc'
     # shellcheck disable=SC2086
@@ -1533,6 +1657,32 @@ mod_16_ssh_auth() {
                     "/etc/securetty 변경 — root 로그인 허용 콘솔 정책 변경" "" 1
         fi
     fi
+
+    # ----- (5) /etc/ssh/sshd_config.d/* 변경 (include 디렉토리) -----
+    # sshd -T 가 effective 설정을 보지만, 파일 단위 변경 시각/해시도 별도로 추적.
+    if [ -d /etc/ssh/sshd_config.d ]; then
+        find /etc/ssh/sshd_config.d -type f -print0 2>/dev/null \
+            | xargs -0 -r sha256sum 2>/dev/null | sort | state_save "$M" "sshd_config_d"
+        yp="$(state_yesterday_path "$M" "sshd_config_d")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "sshd_config_d")"
+            cmp -s "$yp" "$tp" || \
+                log_finding "$M" "sshd_config_d_changed" "HIGH" \
+                    "/etc/ssh/sshd_config.d/* 변경 — SSH 설정 조각 변조 의심" "" 1
+        fi
+    fi
+
+    # ----- (6) 사용자 ~/.ssh/config 의 ProxyCommand / LocalCommand -----
+    # 사용자 SSH 클라이언트 설정에 명령 실행 지시가 있으면 트래픽 우회/실행 백도어.
+    local uhome
+    while IFS=: read -r user _ _ _ _ uhome _; do
+        [ -f "$uhome/.ssh/config" ] || continue
+        if grep -qiE '^[[:space:]]*(ProxyCommand|LocalCommand|PermitLocalCommand)' "$uhome/.ssh/config" 2>/dev/null; then
+            log_finding "$M" "ssh_client_command" "MEDIUM" \
+                "사용자 ~/.ssh/config 에 명령 실행 지시(ProxyCommand 등) — 우회/실행 백도어 가능" \
+                "$user: $(grep -iE 'ProxyCommand|LocalCommand' "$uhome/.ssh/config" 2>/dev/null | head -1)" 0
+        fi
+    done < /etc/passwd
 
     return 0
 }
@@ -1929,16 +2079,62 @@ mod_20_system_integrity() {
             ;;
     esac
 
+    # ----- 패키지 설치/업그레이드 이력 어제 diff -----
+    # 공격자가 백도어 패키지를 설치한 흔적. dpkg.log / yum.log(또는 dnf) 파싱.
+    local histlog='' inst_today inst_yp inst_tp pkg
+    case "$OS_FAMILY" in
+        debian)
+            [ -r /var/log/dpkg.log ] && histlog='/var/log/dpkg.log'
+            if [ -n "$histlog" ]; then
+                inst_today="$(mk_tmp)" || return 0
+                # "... install <pkg>:arch <ver>" 라인에서 패키지명 추출
+                grep -hE ' (install|upgrade) ' /var/log/dpkg.log* 2>/dev/null \
+                    | awk '{print $4, $5}' | sort -u > "$inst_today"
+                state_save "$M" "pkg_history" < "$inst_today"
+            fi
+            ;;
+        rhel)
+            for f in /var/log/dnf.rpm.log /var/log/yum.log /var/log/dnf.log; do
+                [ -r "$f" ] && histlog="$f" && break
+            done
+            if [ -n "$histlog" ]; then
+                inst_today="$(mk_tmp)" || return 0
+                grep -hiE 'install|update' "$histlog"* 2>/dev/null \
+                    | sort -u > "$inst_today"
+                state_save "$M" "pkg_history" < "$inst_today"
+            fi
+            ;;
+    esac
+
+    if [ -n "$histlog" ]; then
+        inst_yp="$(state_yesterday_path "$M" "pkg_history")"
+        if [ -n "$inst_yp" ]; then
+            inst_tp="$(state_path "$M" "pkg_history")"
+            local newpkg_cnt=0
+            while IFS= read -r pkg; do
+                [ -z "$pkg" ] && continue
+                newpkg_cnt=$((newpkg_cnt + 1))
+                [ "$newpkg_cnt" -le 20 ] && \
+                    log_finding "$M" "new_package" "MEDIUM" \
+                        "신규 패키지 설치/업그레이드 — 운영자 작업인지 확인" "$pkg" 1
+            done < <(comm -13 "$inst_yp" "$inst_tp")
+            [ "$newpkg_cnt" -gt 20 ] && \
+                log_finding "$M" "new_package_more" "INFO" \
+                    "신규 패키지 외 $((newpkg_cnt - 20))건" "" 1
+        fi
+    fi
+
     return 0
 }
 
 # ---------------------------------------------------------------------------
-# 21_network_config.sh — 네트워크 설정 변조
+# 21_network_config.sh — 네트워크 / 시스템 설정 변조
 # ---------------------------------------------------------------------------
 # 보는 것: resolv.conf 외부 DNS, /etc/hosts 외부 도메인 매핑, nsswitch 변경,
-#          yum/apt repo 변경, 신뢰 CA 저장소 신규 파일
+#          yum/apt repo 변경, 신뢰 CA 저장소 신규 파일,
+#          sysctl 보안 무력화(ip_forward/randomize_va_space 등), /etc/fstab 변조
 # 왜: DNS 하이재킹, /etc/hosts 위장, 가짜 CA 주입은 모두 "신뢰" 인프라를 공격자
-#     쪽으로 옮기는 핵심 수법. 한 번 성공하면 이후 모든 외부 통신을 가로챈다.
+#     쪽으로 옮기는 핵심 수법. sysctl/fstab 변조는 보안 기능 자체를 끄는 행위.
 
 # secchk.conf 에서 운영자가 등록할 수 있는 신뢰 외부 DNS (예: 8.8.8.8 1.1.1.1)
 # 사내 DNS는 사설망 IP(자동 신뢰)이므로 보통 비어있음. 외부 공용 DNS(8.8.8.8 등)를
@@ -2072,6 +2268,53 @@ mod_21_network_config() {
             done < <(comm -13 "$yp" "$tp")
         fi
     done
+
+    # ----- (6) sysctl 보안 관련 값 — 무력화 탐지 -----
+    # 공격자가 보안 기능을 끄는 대표 값들을 직접 읽어 위험 상태면 보고.
+    if have_cmd sysctl; then
+        local val
+        # IP forwarding 활성화 (라우터가 아닌 일반 서버에서 1이면 의심)
+        val="$(sysctl -n net.ipv4.ip_forward 2>/dev/null)"
+        [ "$val" = '1' ] && \
+            log_finding "$M" "sysctl_ip_forward" "MEDIUM" \
+                "net.ipv4.ip_forward=1 — 패킷 포워딩 활성(일반 서버면 트래픽 우회 의심)" "" 0
+        # ASLR 무력화
+        val="$(sysctl -n kernel.randomize_va_space 2>/dev/null)"
+        [ -n "$val" ] && [ "$val" = '0' ] && \
+            log_finding "$M" "sysctl_aslr_off" "HIGH" \
+                "kernel.randomize_va_space=0 — ASLR 무력화(익스플로잇 용이화)" "" 0
+        # core dump 무제한 + suid dumpable (정보 유출 경로)
+        val="$(sysctl -n fs.suid_dumpable 2>/dev/null)"
+        [ "$val" = '1' ] || [ "$val" = '2' ] && \
+            log_finding "$M" "sysctl_suid_dumpable" "MEDIUM" \
+                "fs.suid_dumpable=${val} — SUID 프로세스 코어덤프 허용(메모리 유출 경로)" "" 0
+        # 설정 파일 자체 변경도 추적
+        {
+            [ -f /etc/sysctl.conf ] && sha256sum /etc/sysctl.conf 2>/dev/null
+            [ -d /etc/sysctl.d ] && find /etc/sysctl.d -type f -print0 2>/dev/null \
+                | xargs -0 -r sha256sum 2>/dev/null
+        } | sort | state_save "$M" "sysctl_files"
+        yp="$(state_yesterday_path "$M" "sysctl_files")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "sysctl_files")"
+            cmp -s "$yp" "$tp" || \
+                log_finding "$M" "sysctl_files_changed" "MEDIUM" \
+                    "sysctl 설정 파일 변경 — 커널 파라미터 변조 가능" "" 1
+        fi
+    fi
+
+    # ----- (7) /etc/fstab 변경 — nosuid/noexec 마운트 옵션 제거 등 -----
+    if [ -f /etc/fstab ]; then
+        h="$(sha256sum /etc/fstab 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$h" ] && printf '%s\n' "$h" | state_save "$M" "fstab_hash"
+        yp="$(state_yesterday_path "$M" "fstab_hash")"
+        if [ -n "$yp" ]; then
+            old_h="$(cat "$yp" 2>/dev/null)"
+            [ -n "$old_h" ] && [ "$h" != "$old_h" ] && \
+                log_finding "$M" "fstab_changed" "MEDIUM" \
+                    "/etc/fstab 변경 — 마운트 옵션(nosuid/noexec) 변조 가능" "" 1
+        fi
+    fi
 
     return 0
 }

@@ -88,5 +88,50 @@ mod_11_login_history() {
         )
     fi
 
+    # (4) auth.log / secure 라인 분석 — sudo/su 시도, 인증 실패, 계정 변경 이벤트
+    # 사이즈만 보는 18_log_tamper 와 달리 "무슨 일이 있었나" 를 라인 내용에서 본다.
+    # 24시간 내 항목만 집계하기 어려우므로(로그 포맷이 연도 없음) 최근 N줄 기준.
+    local authlog=''
+    case "$OS_FAMILY" in
+        rhel)   [ -r /var/log/secure ]   && authlog='/var/log/secure' ;;
+        debian) [ -r /var/log/auth.log ] && authlog='/var/log/auth.log' ;;
+        *)      [ -r /var/log/auth.log ] && authlog='/var/log/auth.log'
+                [ -z "$authlog" ] && [ -r /var/log/secure ] && authlog='/var/log/secure' ;;
+    esac
+
+    if [ -n "$authlog" ]; then
+        local tail_lines cnt
+        tail_lines="$(mk_tmp)" || return 0
+        tail -n 2000 "$authlog" 2>/dev/null > "$tail_lines"
+
+        # sudo 인증 실패 (sudo: ... authentication failure / NOPASSWD 아닌 실패)
+        cnt="$(grep -cE 'sudo:.*authentication failure|sudo:.*incorrect password' "$tail_lines" 2>/dev/null || echo 0)"
+        [ "$cnt" -gt 0 ] && \
+            log_finding "$M" "sudo_auth_failure" "MEDIUM" \
+                "sudo 인증 실패 ${cnt}건 (최근 로그) — 권한 상승 시도 의심" \
+                "$(grep -E 'sudo:.*authentication failure|sudo:.*incorrect password' "$tail_lines" 2>/dev/null | tail -3 | tr '\n' '|')" 0
+
+        # su 실패
+        cnt="$(grep -cE 'su(\[[0-9]+\])?:.*(FAILED|authentication failure)' "$tail_lines" 2>/dev/null || echo 0)"
+        [ "$cnt" -gt 0 ] && \
+            log_finding "$M" "su_failure" "MEDIUM" \
+                "su 실패 ${cnt}건 (최근 로그)" \
+                "$(grep -E 'su(\[[0-9]+\])?:.*(FAILED|authentication failure)' "$tail_lines" 2>/dev/null | tail -3 | tr '\n' '|')" 0
+
+        # 계정 변경 이벤트 (useradd/usermod/userdel/passwd/groupadd)
+        cnt="$(grep -cE 'useradd\[|usermod\[|userdel\[|groupadd\[|passwd\[.*password changed' "$tail_lines" 2>/dev/null || echo 0)"
+        [ "$cnt" -gt 0 ] && \
+            log_finding "$M" "account_change_event" "INFO" \
+                "계정/그룹 변경 이벤트 ${cnt}건 (최근 로그) — 10_account 결과와 교차 확인" \
+                "$(grep -E 'useradd\[|usermod\[|userdel\[|groupadd\[' "$tail_lines" 2>/dev/null | tail -3 | tr '\n' '|')" 0
+
+        # SSH 인증 실패 폭주 (lastb 와 별개로 로그 기반 보강)
+        cnt="$(grep -cE 'sshd\[[0-9]+\]:.*(Failed password|Invalid user|authentication failure)' "$tail_lines" 2>/dev/null || echo 0)"
+        if [ "$cnt" -ge "$FAILED_LOGIN_THRESHOLD" ]; then
+            log_finding "$M" "sshd_auth_failure_burst" "MEDIUM" \
+                "sshd 인증 실패 ${cnt}건 (최근 로그, >= ${FAILED_LOGIN_THRESHOLD}) — 무차별 공격 의심" "" 0
+        fi
+    fi
+
     return 0
 }

@@ -123,5 +123,50 @@ mod_20_system_integrity() {
             ;;
     esac
 
+    # ----- 패키지 설치/업그레이드 이력 어제 diff -----
+    # 공격자가 백도어 패키지를 설치한 흔적. dpkg.log / yum.log(또는 dnf) 파싱.
+    local histlog='' inst_today inst_yp inst_tp pkg
+    case "$OS_FAMILY" in
+        debian)
+            [ -r /var/log/dpkg.log ] && histlog='/var/log/dpkg.log'
+            if [ -n "$histlog" ]; then
+                inst_today="$(mk_tmp)" || return 0
+                # "... install <pkg>:arch <ver>" 라인에서 패키지명 추출
+                grep -hE ' (install|upgrade) ' /var/log/dpkg.log* 2>/dev/null \
+                    | awk '{print $4, $5}' | sort -u > "$inst_today"
+                state_save "$M" "pkg_history" < "$inst_today"
+            fi
+            ;;
+        rhel)
+            for f in /var/log/dnf.rpm.log /var/log/yum.log /var/log/dnf.log; do
+                [ -r "$f" ] && histlog="$f" && break
+            done
+            if [ -n "$histlog" ]; then
+                inst_today="$(mk_tmp)" || return 0
+                grep -hiE 'install|update' "$histlog"* 2>/dev/null \
+                    | sort -u > "$inst_today"
+                state_save "$M" "pkg_history" < "$inst_today"
+            fi
+            ;;
+    esac
+
+    if [ -n "$histlog" ]; then
+        inst_yp="$(state_yesterday_path "$M" "pkg_history")"
+        if [ -n "$inst_yp" ]; then
+            inst_tp="$(state_path "$M" "pkg_history")"
+            local newpkg_cnt=0
+            while IFS= read -r pkg; do
+                [ -z "$pkg" ] && continue
+                newpkg_cnt=$((newpkg_cnt + 1))
+                [ "$newpkg_cnt" -le 20 ] && \
+                    log_finding "$M" "new_package" "MEDIUM" \
+                        "신규 패키지 설치/업그레이드 — 운영자 작업인지 확인" "$pkg" 1
+            done < <(comm -13 "$inst_yp" "$inst_tp")
+            [ "$newpkg_cnt" -gt 20 ] && \
+                log_finding "$M" "new_package_more" "INFO" \
+                    "신규 패키지 외 $((newpkg_cnt - 20))건" "" 1
+        fi
+    fi
+
     return 0
 }

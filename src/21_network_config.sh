@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# 21_network_config.sh — 네트워크 설정 변조
+# 21_network_config.sh — 네트워크 / 시스템 설정 변조
 # ---------------------------------------------------------------------------
 # 보는 것: resolv.conf 외부 DNS, /etc/hosts 외부 도메인 매핑, nsswitch 변경,
-#          yum/apt repo 변경, 신뢰 CA 저장소 신규 파일
+#          yum/apt repo 변경, 신뢰 CA 저장소 신규 파일,
+#          sysctl 보안 무력화(ip_forward/randomize_va_space 등), /etc/fstab 변조
 # 왜: DNS 하이재킹, /etc/hosts 위장, 가짜 CA 주입은 모두 "신뢰" 인프라를 공격자
-#     쪽으로 옮기는 핵심 수법. 한 번 성공하면 이후 모든 외부 통신을 가로챈다.
+#     쪽으로 옮기는 핵심 수법. sysctl/fstab 변조는 보안 기능 자체를 끄는 행위.
 
 # secchk.conf 에서 운영자가 등록할 수 있는 신뢰 외부 DNS (예: 8.8.8.8 1.1.1.1)
 # 사내 DNS는 사설망 IP(자동 신뢰)이므로 보통 비어있음. 외부 공용 DNS(8.8.8.8 등)를
@@ -139,6 +140,53 @@ mod_21_network_config() {
             done < <(comm -13 "$yp" "$tp")
         fi
     done
+
+    # ----- (6) sysctl 보안 관련 값 — 무력화 탐지 -----
+    # 공격자가 보안 기능을 끄는 대표 값들을 직접 읽어 위험 상태면 보고.
+    if have_cmd sysctl; then
+        local val
+        # IP forwarding 활성화 (라우터가 아닌 일반 서버에서 1이면 의심)
+        val="$(sysctl -n net.ipv4.ip_forward 2>/dev/null)"
+        [ "$val" = '1' ] && \
+            log_finding "$M" "sysctl_ip_forward" "MEDIUM" \
+                "net.ipv4.ip_forward=1 — 패킷 포워딩 활성(일반 서버면 트래픽 우회 의심)" "" 0
+        # ASLR 무력화
+        val="$(sysctl -n kernel.randomize_va_space 2>/dev/null)"
+        [ -n "$val" ] && [ "$val" = '0' ] && \
+            log_finding "$M" "sysctl_aslr_off" "HIGH" \
+                "kernel.randomize_va_space=0 — ASLR 무력화(익스플로잇 용이화)" "" 0
+        # core dump 무제한 + suid dumpable (정보 유출 경로)
+        val="$(sysctl -n fs.suid_dumpable 2>/dev/null)"
+        [ "$val" = '1' ] || [ "$val" = '2' ] && \
+            log_finding "$M" "sysctl_suid_dumpable" "MEDIUM" \
+                "fs.suid_dumpable=${val} — SUID 프로세스 코어덤프 허용(메모리 유출 경로)" "" 0
+        # 설정 파일 자체 변경도 추적
+        {
+            [ -f /etc/sysctl.conf ] && sha256sum /etc/sysctl.conf 2>/dev/null
+            [ -d /etc/sysctl.d ] && find /etc/sysctl.d -type f -print0 2>/dev/null \
+                | xargs -0 -r sha256sum 2>/dev/null
+        } | sort | state_save "$M" "sysctl_files"
+        yp="$(state_yesterday_path "$M" "sysctl_files")"
+        if [ -n "$yp" ]; then
+            tp="$(state_path "$M" "sysctl_files")"
+            cmp -s "$yp" "$tp" || \
+                log_finding "$M" "sysctl_files_changed" "MEDIUM" \
+                    "sysctl 설정 파일 변경 — 커널 파라미터 변조 가능" "" 1
+        fi
+    fi
+
+    # ----- (7) /etc/fstab 변경 — nosuid/noexec 마운트 옵션 제거 등 -----
+    if [ -f /etc/fstab ]; then
+        h="$(sha256sum /etc/fstab 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$h" ] && printf '%s\n' "$h" | state_save "$M" "fstab_hash"
+        yp="$(state_yesterday_path "$M" "fstab_hash")"
+        if [ -n "$yp" ]; then
+            old_h="$(cat "$yp" 2>/dev/null)"
+            [ -n "$old_h" ] && [ "$h" != "$old_h" ] && \
+                log_finding "$M" "fstab_changed" "MEDIUM" \
+                    "/etc/fstab 변경 — 마운트 옵션(nosuid/noexec) 변조 가능" "" 1
+        fi
+    fi
 
     return 0
 }
