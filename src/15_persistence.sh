@@ -37,9 +37,13 @@ mod_15_persistence() {
     local reboot_cron
     reboot_cron="$(
         {
-            grep -hE '^[^#]*@reboot' /etc/crontab /etc/cron.d/* 2>/dev/null
-            for cu in /var/spool/cron/crontabs/* /var/spool/cron/*; do
-                [ -f "$cu" ] && grep -hE '^[^#]*@reboot' "$cu" 2>/dev/null
+            [ -f /etc/crontab ] && grep -hE '^[^#]*@reboot' /etc/crontab 2>/dev/null
+            [ -d /etc/cron.d ] && find /etc/cron.d -maxdepth 1 -type f \
+                -exec grep -hE '^[^#]*@reboot' {} + 2>/dev/null
+            for d in /var/spool/cron/crontabs /var/spool/cron; do
+                [ -d "$d" ] || continue
+                find "$d" -maxdepth 1 -type f \
+                    -exec grep -hE '^[^#]*@reboot' {} + 2>/dev/null
             done
         } | head -10
     )"

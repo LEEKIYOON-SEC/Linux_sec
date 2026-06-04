@@ -691,7 +691,7 @@ ClamAV와 다른 시그니처 DB를 사용하므로 보조 검증 레이어가 �
 
 ## 10. 침해 탐지 예시
 
-다음은 12종의 침해를 동시에 심어두고 점검을 돌린 결과입니다 (검증 시나리오 B). 아래 이미지 역시 실제 `report.html` 캡처입니다.
+다음은 18종의 침해를 동시에 심어두고 점검을 돌린 결과입니다 (검증 시나리오 B). 아래 이미지는 실제 `report.html` 캡처입니다.
 
 ![침해 탐지 예시](captures/scenario_B_alert.png)
 
@@ -701,18 +701,24 @@ ClamAV와 다른 시그니처 DB를 사용하므로 보조 검증 레이어가 �
 |---|---|
 | 신규 사용자 추가 (`useradd hacker_alice`) | 10 (critical_file_changed × 3 + new_account) |
 | sudoers NOPASSWD 라인 | 10 (sudoers_changed + new_nopasswd) |
-| `/tmp` 의심 실행 (`.attacker_payload`) | 13 (suspicious_exec_location + suspicious_mapping) |
-| `/opt` 신규 SUID (`.suid_backdoor`) | 14 (new_suid) |
+| `/tmp` 의심 실행 (`.payload`) | 13 (suspicious_exec_location + suspicious_mapping) |
+| `/opt` 신규 SUID (`.suid_bd`) | 14 (new_suid) |
+| `/usr/local/bin` 신규 file capability (`.capbd` + cap_setuid) | 14 (new_file_capability) |
 | `/etc/ld.so.preload` 생성 | 15 (ld_preload_file) |
-| `cron.d` 신규 백도어 | 15 (cron_changed) |
+| `/etc/cron.d/_bd` 백도어 | 15 (cron_changed) |
+| `/etc/cron.d/_reboot` `@reboot` 항목 | 15 (reboot_cron) |
 | `.bashrc`의 LD_PRELOAD | 15 (ld_preload_user_shell) |
-| 신규 SSH authorized_key | 16 (new_ssh_key) |
+| 실행 중 프로세스의 LD_PRELOAD 환경변수 | 15 (ld_preload_process_env) |
+| `/etc/systemd/system/_evil.service` 신규 유닛 | 15 (new_systemd_service) |
+| 신규 SSH `authorized_keys` 키 | 16 (new_ssh_key) |
+| `~/.ssh/config` ProxyCommand 추가 | 16 (ssh_client_command) |
 | 더미 웹쉘 (eval base64_decode) | 17 (webshell_pattern_match) |
 | 로그 파일 0바이트 + 사이즈 감소 | 18 (log_zero_size × 2 + log_size_decreased) |
 | `/bin/ls` 변조 | 20 (debsums_mismatch MEDIUM + core_pkg_mismatch HIGH) |
 | `/etc/hosts` 외부 매핑 + 가짜 CA | 21 (hosts_external_mapping + new_ca_cert) |
+| `/etc/fstab` 변경 | 21 (fstab_changed) |
 
-→ 총 **HIGH 18 + MEDIUM 6 = STATUS:ALERT**. 12종 침해가 9개 모듈에서 모두 탐지됩니다.
+→ 총 **HIGH 20 + MEDIUM 9 = STATUS:ALERT**. 18종 침해가 9개 모듈에서 모두 탐지됩니다.
 
 ---
 
